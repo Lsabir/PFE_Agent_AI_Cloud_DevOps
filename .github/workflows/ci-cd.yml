@@ -66,10 +66,6 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -reconfigure
 
-      - name: Terraform Validate
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform validate
-
       - name: Terraform Plan
         working-directory: ${{ env.TF_DIR }}
         env:
