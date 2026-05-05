@@ -1,7 +1,7 @@
 variable "location" {
   description = "Azure region for all resources."
   type        = string
-  default     = "germanywestcentral"
+  default     = "swedencentral"
 }
 
 
@@ -117,7 +117,7 @@ variable "create_openai" {
 variable "kv_unique_suffix" {
   description = "Short unique suffix for the Key Vault name (globally unique constraint, e.g. '-pfe')."
   type        = string
-  default     = "-pfe"
+  default     = "-pfe2"
 }
 
 variable "custom_data" {
