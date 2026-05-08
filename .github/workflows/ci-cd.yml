@@ -86,6 +86,10 @@ jobs:
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_kv_allowed_ips: '["${{ steps.runner_ip.outputs.ip }}"]'
+          TF_VAR_create_openai: "true"
+          TF_VAR_openai_location: "swedencentral"
+          TF_VAR_openai_model_capacity: "1"
+          TF_VAR_vm_size: "Standard_D2as_v4"
         run: |
           terraform plan -out=tfplan -no-color 2>&1 | tee /tmp/tfplan.txt
           echo "── Résumé ──────────────────────────────────────────"
@@ -96,6 +100,10 @@ jobs:
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_kv_allowed_ips: '["${{ steps.runner_ip.outputs.ip }}"]'
+          TF_VAR_create_openai: "true"
+          TF_VAR_openai_location: "swedencentral"
+          TF_VAR_openai_model_capacity: "1"
+          TF_VAR_vm_size: "Standard_D2as_v4"
         run: terraform apply -auto-approve tfplan
 
       - name: Écrire secrets OpenAI dans Key Vault
