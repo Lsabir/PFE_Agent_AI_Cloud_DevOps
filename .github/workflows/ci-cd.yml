@@ -73,6 +73,14 @@ jobs:
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
           echo "✅ IP runner : $IP"
 
+      - name: Pré-autoriser runner IP dans Key Vault (si KV existe déjà)
+        run: |
+          KV_NAME="agent-devops-kv-pfe2"
+          RUNNER_IP="${{ steps.runner_ip.outputs.ip }}"
+          az keyvault network-rule add --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none 2>/dev/null \
+            && echo "✅ IP $RUNNER_IP ajoutée au KV — attente propagation (20s)..." && sleep 20 \
+            || echo "ℹ KV inexistant encore — Terraform va le créer"
+
       - name: Terraform Plan
         working-directory: ${{ env.TF_DIR }}
         env:
