@@ -9,6 +9,14 @@ resource "azurerm_cognitive_account" "openai" {
   tags                          = var.tags
 }
 
+# Azure Cognitive Services reports "created" before the account is fully
+# provisioned. Without this wait, the private endpoint fails with 400
+# AccountProvisioningStateInvalid (state: Accepted).
+resource "time_sleep" "wait_for_openai_provisioning" {
+  depends_on      = [azurerm_cognitive_account.openai]
+  create_duration = "60s"
+}
+
 resource "azurerm_cognitive_deployment" "gpt" {
   name                 = var.deployment_name
   cognitive_account_id = azurerm_cognitive_account.openai.id
@@ -23,6 +31,8 @@ resource "azurerm_cognitive_deployment" "gpt" {
     name     = "Standard"
     capacity = var.capacity
   }
+
+  depends_on = [time_sleep.wait_for_openai_provisioning]
 }
 
 resource "azurerm_private_endpoint" "openai_pe" {
@@ -42,4 +52,6 @@ resource "azurerm_private_endpoint" "openai_pe" {
     name                 = "openai-dns"
     private_dns_zone_ids = [var.private_dns_zone_id]
   }
+
+  depends_on = [time_sleep.wait_for_openai_provisioning]
 }

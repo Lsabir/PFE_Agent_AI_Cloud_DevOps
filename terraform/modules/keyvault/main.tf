@@ -15,50 +15,11 @@ resource "azurerm_key_vault" "agent_key_vault" {
 
   network_acls {
     default_action = "Deny"
-    bypass         = "None"
+    bypass         = "AzureServices"
+    ip_rules       = var.allowed_ip_cidrs
   }
 
   tags = var.tags
-}
-
-resource "azurerm_key_vault_secret" "jira_api_token" {
-  name         = "jira-api-token"
-  value        = "PLACEHOLDER"
-  key_vault_id = azurerm_key_vault.agent_key_vault.id
-
-
-
- # a supprimer apres test
-   count        = var.enable_secrets ? 1 : 0
-}
-
-resource "azurerm_key_vault_secret" "gitlab_token" {
-  name         = "gitlab-token"
-  value        = "PLACEHOLDER"
-  key_vault_id = azurerm_key_vault.agent_key_vault.id
-
-
- # a supprimer apres test
-   count        = var.enable_secrets ? 1 : 0
-}
-
-resource "azurerm_key_vault_secret" "github_token" {
-  name         = "github-token"
-  value        = "PLACEHOLDER"
-  key_vault_id = azurerm_key_vault.agent_key_vault.id
-
-  # a supprimer apres test
-   count        = var.enable_secrets ? 1 : 0
-}
-
-resource "azurerm_key_vault_secret" "azure_openai_key" {
-  name         = "azure-openai-key"
-  value        = "PLACEHOLDER"
-  key_vault_id = azurerm_key_vault.agent_key_vault.id
-
-
- # a supprimer apres test
-   count        = var.enable_secrets ? 1 : 0
 }
 
 resource "azurerm_private_endpoint" "key_vault_pe" {

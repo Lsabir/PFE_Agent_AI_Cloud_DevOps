@@ -69,14 +69,29 @@ class OpenAIClient:
 
     # ── Analyse de la description ──────────────────────────────────────────────
 
-    def analyze_description(self, description: str) -> InfraAnalysis:
+    def analyze_description(self, description: str, existing_tf: dict[str, str] | None = None) -> InfraAnalysis:
         """
         Envoie la description au LLM et récupère une analyse JSON structurée
         des ressources Azure à créer.
+        existing_tf : fichiers .tf existants du projet (peut être vide ou None).
         """
+        existing_context = ""
+        if existing_tf:
+            files_summary = "\n\n".join(
+                f"### {fname}\n```hcl\n{content[:800]}{'...' if len(content) > 800 else ''}\n```"
+                for fname, content in existing_tf.items()
+            )
+            existing_context = f"""
+CONTEXTE — Infrastructure déjà déployée dans ce projet :
+{files_summary}
+
+Tiens compte de ces ressources existantes : ne les recrée pas, réutilise leurs
+noms/IDs si la nouvelle demande en dépend, et signale toute mise à jour nécessaire.
+"""
+
         prompt = f"""
 Analyse la demande d'infrastructure suivante et retourne UNIQUEMENT un JSON valide.
-
+{existing_context}
 Demande : {description}
 
 Format JSON attendu :
@@ -138,10 +153,11 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
 
     # ── Génération du code Terraform ───────────────────────────────────────────
 
-    def generate_terraform(self, analysis: InfraAnalysis) -> dict[str, str]:
+    def generate_terraform(self, analysis: InfraAnalysis, existing_tf: dict[str, str] | None = None) -> dict[str, str]:
         """
         Génère les fichiers Terraform complets basés sur l'analyse.
         Retourne un dict {nom_fichier: contenu}.
+        existing_tf : fichiers .tf existants à fusionner/mettre à jour.
         """
         resources_desc = json.dumps(
             [{"type": r.type, "name": r.name, "parameters": r.parameters}
@@ -149,9 +165,23 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
             indent=2
         )
 
+        existing_context = ""
+        if existing_tf:
+            files_summary = "\n\n".join(
+                f"### {fname}\n```hcl\n{content}\n```"
+                for fname, content in existing_tf.items()
+            )
+            existing_context = f"""
+FICHIERS TERRAFORM EXISTANTS (à mettre à jour, ne pas dupliquer les ressources) :
+{files_summary}
+
+Fusionne les nouvelles ressources avec l'existant. Conserve les ressources déjà
+présentes telles quelles, ajoute uniquement ce qui est nouveau.
+"""
+
         prompt = f"""
 Génère un projet Terraform Azure COMPLET pour les ressources suivantes.
-
+{existing_context}
 Projet : {analysis.project_name}
 Environnement : {analysis.environment}
 Région : {analysis.location}

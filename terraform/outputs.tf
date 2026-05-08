@@ -28,6 +28,11 @@ output "key_vault_uri" {
   value       = module.keyvault.key_vault_uri
 }
 
+output "key_vault_name" {
+  description = "Name of the deployed Key Vault."
+  value       = module.keyvault.key_vault_name
+}
+
 output "openai_account_name" {
   description = "Azure OpenAI account name (only when create_openai=true)."
   value       = var.create_openai ? module.openai[0].openai_account_name : "not deployed via Terraform — create manually in Azure Portal"

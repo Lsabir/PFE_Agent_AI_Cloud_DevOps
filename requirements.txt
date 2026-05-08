@@ -14,4 +14,3 @@ requests>=2.31.0
 
 # Utilitaires
 python-dotenv>=1.0.0      # chargement du fichier .env en local
-rich>=13.7.0              # affichage amélioré (optionnel)

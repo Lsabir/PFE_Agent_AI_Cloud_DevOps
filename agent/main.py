@@ -19,7 +19,6 @@ from agent.config import load_config
 from agent.openai_client import OpenAIClient
 from agent.github_manager import GitHubManager
 from agent.jira_manager import JiraManager
-from agent.workflow_template import generate_workflow
 
 
 # ── Helpers d'affichage ──────────────────────────────────────────────────────
@@ -172,8 +171,25 @@ def run_agent() -> None:
     print("  Envoi au modèle GPT-4 pour identifier les ressources...")
 
     openai_client = OpenAIClient(config)
+    gh_early = GitHubManager(config)
+
+    # Tentative de récupération du contexte existant (best-effort)
+    existing_tf: dict = {}
     try:
-        analysis = openai_client.analyze_description(description)
+        gh_early.ensure_repo_exists()
+        # On ne connaît pas encore le project_name → on le déduira après analyse
+        # Première passe sans contexte pour obtenir le project_name
+        analysis_preview = openai_client.analyze_description(description)
+        existing_tf = gh_early.get_existing_context(analysis_preview.project_name)
+        if existing_tf:
+            info(f"Contexte existant détecté : {len(existing_tf)} fichier(s) .tf trouvé(s) pour '{analysis_preview.project_name}'.")
+            for fname in existing_tf:
+                print(f"     • {fname}")
+            # Seconde passe avec le contexte pour affiner l'analyse
+            analysis = openai_client.analyze_description(description, existing_tf=existing_tf)
+        else:
+            info(f"Aucun fichier .tf existant pour '{analysis_preview.project_name}' — génération complète.")
+            analysis = analysis_preview
     except Exception as e:
         print(f"  ❌ Erreur Azure OpenAI : {e}")
         jira.transition_to_todo(issue_key)
@@ -200,7 +216,7 @@ def run_agent() -> None:
     print("  Génération des fichiers .tf selon les bonnes pratiques Azure...")
 
     try:
-        tf_files = openai_client.generate_terraform(analysis)
+        tf_files = openai_client.generate_terraform(analysis, existing_tf=existing_tf)
     except Exception as e:
         print(f"  ❌ Erreur génération Terraform : {e}")
         sys.exit(1)
@@ -218,13 +234,23 @@ def run_agent() -> None:
     # ── 6. Préparation du repository GitHub ──────────────────────────────────
     section("6. Préparation du repository GitHub")
 
-    gh = GitHubManager(config)
+    gh = gh_early
     try:
         repo_url = gh.ensure_repo_exists()
         success(f"Repo : {repo_url}")
     except Exception as e:
         print(f"  ❌ Erreur GitHub : {e}")
         sys.exit(1)
+
+    # Déployer le pipeline standard une seule fois (idempotent)
+    try:
+        created = gh.ensure_standard_pipeline()
+        if created:
+            success("Pipeline Terraform standard créé dans le repo.")
+        else:
+            info("Pipeline Terraform standard déjà présent.")
+    except Exception as e:
+        warn(f"Impossible de vérifier le pipeline standard : {e}")
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     branch_name = f"feature/{issue_key}-{analysis.project_name}-{analysis.environment}-{timestamp}"
@@ -251,14 +277,8 @@ def run_agent() -> None:
         print(f"  ❌ Erreur push : {e}")
         sys.exit(1)
 
-    workflow_content = generate_workflow(
-        project_name=analysis.project_name,
-        environment=analysis.environment,
-    )
-    try:
-        gh.push_workflow(branch=branch_name, workflow_content=workflow_content)
-    except Exception as e:
-        warn(f"Impossible de pousser le workflow : {e}")
+    # Le pipeline standard unique gère automatiquement ce projet
+    info("Le pipeline standard terraform-standard.yml prend en charge ce déploiement.")
 
     # ── 8. Création de la Pull Request ───────────────────────────────────────
     section("8. Création de la Pull Request")

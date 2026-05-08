@@ -42,9 +42,8 @@ variable "tags" {
 
 
 
-# a supprimer apres test
-variable "enable_secrets" {
-  description = "Enable creation of Key Vault secrets (set false for initial infra deployment)."
-  type        = bool
-  default     = false
+variable "allowed_ip_cidrs" {
+  description = "IPs/CIDRs autorisés à accéder au Key Vault (ex: IP du runner CI ou admin)."
+  type        = list(string)
+  default     = []
 }

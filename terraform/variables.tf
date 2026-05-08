@@ -120,19 +120,15 @@ variable "kv_unique_suffix" {
   default     = "-pfe2"
 }
 
-variable "custom_data" {
-  description = "Placeholder cloud-init data injected into the Linux VM."
-  type        = string
-  default     = <<-EOT
-    #cloud-config
-    package_update: true
-    package_upgrade: true
-    packages: [python3.11, python3.11-venv, python3-pip, git, curl, unzip]
-    runcmd:
-      - update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-      - cd /home/azureuser && git clone https://github.com/Lsabir/PFE_Agent_AI_Cloud_DevOps.git agent-repo
-      - cd /home/azureuser/agent-repo && python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
-      - echo "GITHUB_OWNER=Lsabir" >> /home/azureuser/agent-repo/.env
-      - chown -R azureuser:azureuser /home/azureuser/agent-repo
-  EOT
+variable "kv_allowed_ips" {
+  description = "IPs/CIDRs autorisés à accéder au Key Vault depuis l'extérieur du VNet (ex: IP du runner CI)."
+  type        = list(string)
+  default     = []
 }
+
+variable "github_owner" {
+  description = "GitHub username or org that owns the infra repository."
+  type        = string
+  default     = "Lsabir"
+}
+

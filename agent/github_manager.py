@@ -164,3 +164,44 @@ class GitHubManager:
         payload = {"state": "closed"}
         resp = requests.patch(url, headers=self.headers, json=payload)
         resp.raise_for_status()
+
+    def ensure_standard_pipeline(self) -> bool:
+        """
+        Pousse le pipeline Terraform standard dans le repo infra-provisioned
+        une seule fois. Si le fichier existe déjà, ne fait rien.
+        Retourne True si créé, False si déjà présent.
+        """
+        from agent.standard_pipeline import get_standard_pipeline
+
+        pipeline_path = ".github/workflows/terraform-standard.yml"
+        url = f"{self.api_url}/repos/{self.owner}/{self.repo}/contents/{pipeline_path}"
+        resp = requests.get(url, headers=self.headers)
+
+        if resp.status_code == 200:
+            return False  # déjà présent
+
+        content = get_standard_pipeline()
+        self._create_or_update_file(
+            path=pipeline_path,
+            content=content,
+            branch=self._get_default_branch(),
+            commit_message="chore: add standard Terraform pipeline (agent-managed)",
+        )
+        return True
+
+    def get_existing_context(self, project_name: str) -> Dict[str, str]:
+        """Lit les fichiers .tf existants du projet depuis la branche par défaut."""
+        default_branch = self._get_default_branch()
+        url = f"{self.api_url}/repos/{self.owner}/{self.repo}/contents/{project_name}"
+        resp = requests.get(url, headers=self.headers, params={"ref": default_branch})
+        if resp.status_code == 404:
+            return {}
+        if not resp.ok:
+            return {}
+        files = {}
+        for item in resp.json():
+            if isinstance(item, dict) and item.get("name", "").endswith(".tf"):
+                file_resp = requests.get(item["download_url"], headers=self.headers)
+                if file_resp.ok:
+                    files[item["name"]] = file_resp.text
+        return files
