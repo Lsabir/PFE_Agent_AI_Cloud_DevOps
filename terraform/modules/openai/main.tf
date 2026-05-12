@@ -14,7 +14,7 @@ resource "azurerm_cognitive_account" "openai" {
 # AccountProvisioningStateInvalid (state: Accepted).
 resource "time_sleep" "wait_for_openai_provisioning" {
   depends_on      = [azurerm_cognitive_account.openai]
-  create_duration = "60s"
+  create_duration = "120s"
 }
 
 resource "azurerm_cognitive_deployment" "gpt" {
