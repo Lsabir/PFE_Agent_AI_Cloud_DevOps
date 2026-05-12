@@ -7,8 +7,7 @@ locals {
     owner       = var.owner
   }, var.common_tags)
 
-  # Construction dynamique du custom_data pour injecter les variables d'environnement
-  # L'Agent utilisera automatiquement le Key Vault au lieu des fichiers locaux
+
   agent_custom_data = <<-EOT
     #cloud-config
     package_update: true
@@ -97,8 +96,7 @@ module "keyvault" {
   tags                     = local.tags
 }
 
-# OpenAI est optionnel — activé via create_openai=true une fois le quota approuvé
-# En attendant le quota Azure OpenAI, créer la ressource manuellement via le portail Azure
+
 module "openai" {
   count               = var.create_openai ? 1 : 0
   source              = "./modules/openai"
@@ -127,11 +125,7 @@ resource "azurerm_role_assignment" "github_actions" {
   principal_type       = "ServicePrincipal"
 }
 
-# ── RBAC KEY VAULT ────────────────────────────────────────────────────────────
 
-# Donne au caller Terraform (SP GitHub Actions) le droit d'écrire des secrets.
-# L'écriture réelle des secrets se fait dans le pipeline via az keyvault secret set
-# avec gestion explicite du firewall — pas depuis Terraform (conflit firewall/timing).
 resource "azurerm_role_assignment" "current_user_kv" {
   scope                = module.keyvault.key_vault_id
   role_definition_name = "Key Vault Secrets Officer"

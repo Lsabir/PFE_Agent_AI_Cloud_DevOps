@@ -2,9 +2,10 @@ name: CI/CD — Infra Azure + Agent IA DevOps
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Déclencheurs :
-#   • push sur terraform/** → provisionne l'infra automatiquement
-#   • workflow_dispatch     → lancement manuel ; cocher deploy_agent pour
-#                             déployer l'agent après l'infra
+#   • push sur terraform/** → provisionne l'infra (tf init + plan + apply)
+#   • workflow_dispatch     → lancement manuel avec options :
+#       - infra_only   : tf init + plan + apply uniquement (pas d'agent)
+#       - deploy_agent : infra + config VM + démarrage agent IA
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
@@ -21,6 +22,10 @@ on:
         description: "Ticket Jira à traiter (ex: PM-5) — requis si deploy_agent=true"
         required: false
         default: ""
+      plan_only:
+        description: "Afficher le plan Terraform SANS appliquer (dry-run) ?"
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-cd-${{ github.ref }}
@@ -91,11 +96,30 @@ jobs:
           TF_VAR_openai_model_capacity: "1"
           TF_VAR_vm_size: "Standard_D2as_v4"
         run: |
+          echo "▶ terraform plan..."
           terraform plan -out=tfplan -no-color 2>&1 | tee /tmp/tfplan.txt
-          echo "── Résumé ──────────────────────────────────────────"
-          grep -E "^(Plan|No changes|Error)" /tmp/tfplan.txt || tail -5 /tmp/tfplan.txt
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "  RÉSUMÉ DU PLAN"
+          echo "═══════════════════════════════════════════════════"
+          grep -E "^(Plan:|No changes\.|Error)" /tmp/tfplan.txt || tail -5 /tmp/tfplan.txt
+          echo "═══════════════════════════════════════════════════"
+
+      - name: Publier le plan dans le résumé GitHub
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          {
+            echo "## Terraform Plan — \`$(date -u '+%Y-%m-%d %H:%M UTC')\`"
+            echo ""
+            echo '```'
+            grep -E "^(Plan:|No changes\.|  [#+~-]|Error)" /tmp/tfplan.txt | head -60
+            echo '```'
+            echo ""
+            echo "> ⚠️ \`plan_only=${{ inputs.plan_only }}\` — apply : ${{ inputs.plan_only != 'true' && 'OUI' || 'NON (dry-run)' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Terraform Apply
+        if: ${{ inputs.plan_only != true }}
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
@@ -104,7 +128,9 @@ jobs:
           TF_VAR_openai_location: "swedencentral"
           TF_VAR_openai_model_capacity: "1"
           TF_VAR_vm_size: "Standard_D2as_v4"
-        run: terraform apply -auto-approve tfplan
+        run: |
+          echo "▶ terraform apply..."
+          terraform apply -auto-approve tfplan
 
       - name: Écrire secrets OpenAI dans Key Vault
         working-directory: ${{ env.TF_DIR }}
@@ -134,21 +160,64 @@ jobs:
           az keyvault network-rule remove --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none || true
 
       - name: Capture outputs Terraform
+        if: ${{ inputs.plan_only != true }}
         id: out
         working-directory: ${{ env.TF_DIR }}
         run: |
           VM_IP=$(terraform output -raw vm_public_ip)
           OAI_EP=$(terraform output -raw openai_endpoint)
           OAI_KEY=$(terraform output -raw openai_primary_key)
+          SSH_CMD=$(terraform output -raw ssh_command)
+          KV_NAME=$(terraform output -raw key_vault_name)
           echo "::add-mask::$OAI_KEY"
           {
             echo "vm_ip=$VM_IP"
             echo "openai_endpoint=$OAI_EP"
             echo "openai_key=$OAI_KEY"
           } >> "$GITHUB_OUTPUT"
-          echo "✅ VM IP       : $VM_IP"
-          echo "✅ OpenAI EP   : $OAI_EP"
-          echo "✅ SSH command : $(terraform output -raw ssh_command)"
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║           INFRA DÉPLOYÉE — INFOS DE CONNEXION        ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  VM IP       : $VM_IP"
+          echo "║  OpenAI EP   : $OAI_EP"
+          echo "║  Key Vault   : $KV_NAME"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  SSH COMMAND :"
+          echo "║  $SSH_CMD"
+          echo "╚══════════════════════════════════════════════════════╝"
+
+          {
+            echo ""
+            echo "## Infra déployée"
+            echo ""
+            echo "| Resource | Valeur |"
+            echo "|---|---|"
+            echo "| VM IP | \`$VM_IP\` |"
+            echo "| Key Vault | \`$KV_NAME\` |"
+            echo "| OpenAI Endpoint | \`$OAI_EP\` |"
+            echo ""
+            echo "### Commande SSH pour se connecter à la VM"
+            echo '```bash'
+            echo "$SSH_CMD"
+            echo '```'
+            echo ""
+            echo "### Démarrer l'agent manuellement sur la VM"
+            echo '```bash'
+            echo "# 1. Connexion SSH"
+            echo "$SSH_CMD"
+            echo ""
+            echo "# 2. Aller dans le dossier agent"
+            echo "cd /home/azureuser/agent-repo"
+            echo ""
+            echo "# 3. Activer l'environnement Python"
+            echo "source .venv/bin/activate"
+            echo ""
+            echo "# 4. Lancer l'agent (mode interactif)"
+            echo "python run_agent.py"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
 # =============================================================================
 # JOB 2 — DÉPLOIEMENT AGENT (manuel uniquement via workflow_dispatch)
