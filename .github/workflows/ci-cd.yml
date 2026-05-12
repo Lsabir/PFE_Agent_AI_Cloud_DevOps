@@ -1,11 +1,37 @@
 name: Terraform Deploy
 
+<<<<<<< HEAD
+=======
+# ─────────────────────────────────────────────────────────────────────────────
+# Déclencheurs :
+#   • push sur terraform/** → provisionne l'infra (tf init + plan + apply)
+#   • workflow_dispatch     → lancement manuel avec options :
+#       - infra_only   : tf init + plan + apply uniquement (pas d'agent)
+#       - deploy_agent : infra + config VM + démarrage agent IA
+# ─────────────────────────────────────────────────────────────────────────────
+>>>>>>> 05aa172 (ci cd tf init plan apply)
 on:
   push:
     branches: [main]
     paths:
       - 'terraform/**'
   workflow_dispatch:
+<<<<<<< HEAD
+=======
+    inputs:
+      deploy_agent:
+        description: "Déployer l'agent IA après l'infra ?"
+        type: boolean
+        default: false
+      jira_ticket:
+        description: "Ticket Jira à traiter (ex: PM-5) — requis si deploy_agent=true"
+        required: false
+        default: ""
+      plan_only:
+        description: "Afficher le plan Terraform SANS appliquer (dry-run) ?"
+        type: boolean
+        default: false
+>>>>>>> 05aa172 (ci cd tf init plan apply)
 
 jobs:
   terraform:
@@ -38,6 +64,7 @@ jobs:
         working-directory: terraform
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+<<<<<<< HEAD
         run: terraform plan -out=tfplan
 
       - name: Terraform Apply
@@ -45,3 +72,325 @@ jobs:
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform apply -auto-approve tfplan
+=======
+          TF_VAR_kv_allowed_ips: '["${{ steps.runner_ip.outputs.ip }}"]'
+          TF_VAR_create_openai: "true"
+          TF_VAR_openai_location: "swedencentral"
+          TF_VAR_openai_model_capacity: "1"
+          TF_VAR_vm_size: "Standard_D2as_v4"
+        run: |
+          echo "▶ terraform plan..."
+          terraform plan -out=tfplan -no-color 2>&1 | tee /tmp/tfplan.txt
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "  RÉSUMÉ DU PLAN"
+          echo "═══════════════════════════════════════════════════"
+          grep -E "^(Plan:|No changes\.|Error)" /tmp/tfplan.txt || tail -5 /tmp/tfplan.txt
+          echo "═══════════════════════════════════════════════════"
+
+      - name: Publier le plan dans le résumé GitHub
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          {
+            echo "## Terraform Plan — \`$(date -u '+%Y-%m-%d %H:%M UTC')\`"
+            echo ""
+            echo '```'
+            grep -E "^(Plan:|No changes\.|  [#+~-]|Error)" /tmp/tfplan.txt | head -60
+            echo '```'
+            echo ""
+            echo "> ⚠️ \`plan_only=${{ inputs.plan_only }}\` — apply : ${{ inputs.plan_only != 'true' && 'OUI' || 'NON (dry-run)' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform Apply
+        if: ${{ inputs.plan_only != true }}
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_kv_allowed_ips: '["${{ steps.runner_ip.outputs.ip }}"]'
+          TF_VAR_create_openai: "true"
+          TF_VAR_openai_location: "swedencentral"
+          TF_VAR_openai_model_capacity: "1"
+          TF_VAR_vm_size: "Standard_D2as_v4"
+        run: |
+          echo "▶ terraform apply..."
+          terraform apply -auto-approve tfplan
+
+      - name: Écrire secrets OpenAI dans Key Vault
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          RUNNER_IP: ${{ steps.runner_ip.outputs.ip }}
+        run: |
+          KV_NAME=$(terraform output -raw key_vault_name)
+          OAI_KEY=$(terraform output -raw openai_primary_key 2>/dev/null || echo "")
+          OAI_EP=$(terraform output -raw openai_endpoint 2>/dev/null || echo "")
+
+          # Ne rien faire si OpenAI n'est pas déployé (valeur placeholder)
+          if [[ "$OAI_KEY" == set\ * ]] || [[ -z "$OAI_KEY" ]]; then
+            echo "ℹ OpenAI non déployé — secrets KV non écrits"
+            exit 0
+          fi
+
+          echo "🔓 Ouverture firewall KV pour $RUNNER_IP..."
+          az keyvault network-rule add --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none
+          echo "⏳ Attente propagation (30s)..."
+          sleep 30
+
+          az keyvault secret set --vault-name "$KV_NAME" --name "azure-openai-key"      --value "$OAI_KEY" --output none
+          az keyvault secret set --vault-name "$KV_NAME" --name "azure-openai-endpoint" --value "$OAI_EP" --output none
+          echo "✅ Secrets écrits dans $KV_NAME"
+
+          echo "🔒 Fermeture firewall KV..."
+          az keyvault network-rule remove --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none || true
+
+      - name: Capture outputs Terraform
+        if: ${{ inputs.plan_only != true }}
+        id: out
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          VM_IP=$(terraform output -raw vm_public_ip)
+          OAI_EP=$(terraform output -raw openai_endpoint)
+          OAI_KEY=$(terraform output -raw openai_primary_key)
+          SSH_CMD=$(terraform output -raw ssh_command)
+          KV_NAME=$(terraform output -raw key_vault_name)
+          echo "::add-mask::$OAI_KEY"
+          {
+            echo "vm_ip=$VM_IP"
+            echo "openai_endpoint=$OAI_EP"
+            echo "openai_key=$OAI_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║           INFRA DÉPLOYÉE — INFOS DE CONNEXION        ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  VM IP       : $VM_IP"
+          echo "║  OpenAI EP   : $OAI_EP"
+          echo "║  Key Vault   : $KV_NAME"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  SSH COMMAND :"
+          echo "║  $SSH_CMD"
+          echo "╚══════════════════════════════════════════════════════╝"
+
+          {
+            echo ""
+            echo "## Infra déployée"
+            echo ""
+            echo "| Resource | Valeur |"
+            echo "|---|---|"
+            echo "| VM IP | \`$VM_IP\` |"
+            echo "| Key Vault | \`$KV_NAME\` |"
+            echo "| OpenAI Endpoint | \`$OAI_EP\` |"
+            echo ""
+            echo "### Commande SSH pour se connecter à la VM"
+            echo '```bash'
+            echo "$SSH_CMD"
+            echo '```'
+            echo ""
+            echo "### Démarrer l'agent manuellement sur la VM"
+            echo '```bash'
+            echo "# 1. Connexion SSH"
+            echo "$SSH_CMD"
+            echo ""
+            echo "# 2. Aller dans le dossier agent"
+            echo "cd /home/azureuser/agent-repo"
+            echo ""
+            echo "# 3. Activer l'environnement Python"
+            echo "source .venv/bin/activate"
+            echo ""
+            echo "# 4. Lancer l'agent (mode interactif)"
+            echo "python run_agent.py"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# =============================================================================
+# JOB 2 — DÉPLOIEMENT AGENT (manuel uniquement via workflow_dispatch)
+# =============================================================================
+  configure-vm:
+    name: "2 · VM — Code + Dépendances + .env"
+    runs-on: ubuntu-latest
+    needs: infra
+    if: ${{ inputs.deploy_agent == true }}
+    env:
+      VM_IP: ${{ needs.infra.outputs.vm_ip }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ouvrir SSH — IP runner
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org || curl -sf https://ifconfig.me)
+          az network nsg rule create \
+            --resource-group "$RG_NAME" --nsg-name "$NSG_NAME" \
+            --name "Allow-GH-Configure-Temp" --priority 150 \
+            --direction Inbound --protocol Tcp \
+            --destination-port-ranges 22 \
+            --source-address-prefixes "$RUNNER_IP" \
+            --access Allow --output none
+          echo "✅ Règle NSG ouverte pour $RUNNER_IP"
+
+      - name: Configurer clé SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Attendre SSH sur la VM (max 4 min)
+        run: |
+          for i in $(seq 1 24); do
+            if ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+                   -o ConnectTimeout=8 "azureuser@$VM_IP" "echo ok" 2>/dev/null; then
+              echo "✅ VM accessible (tentative $i)"
+              exit 0
+            fi
+            echo "  tentative $i/24, attente 10s..."
+            sleep 10
+          done
+          echo "❌ VM inaccessible" && exit 1
+
+      - name: Attendre fin cloud-init
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "azureuser@$VM_IP" \
+            "sudo cloud-init status --wait 2>/dev/null || true"
+
+      - name: Synchroniser le code vers la VM
+        run: |
+          tar --exclude='.git' --exclude='terraform/.terraform' \
+              --exclude='terraform/tfplan' --exclude='terraform/terraform.tfstate*' \
+              --exclude='__pycache__' --exclude='*.pyc' --exclude='.env' \
+              -czf /tmp/agent-code.tar.gz .
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+              /tmp/agent-code.tar.gz "azureuser@$VM_IP:/tmp/"
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "azureuser@$VM_IP" << 'REMOTE'
+            mkdir -p /home/azureuser/agent-repo
+            tar -xzf /tmp/agent-code.tar.gz -C /home/azureuser/agent-repo --overwrite
+            echo "✅ Code synchronisé"
+          REMOTE
+
+      - name: Installer dépendances Python
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "azureuser@$VM_IP" << 'REMOTE'
+            set -e
+            cd /home/azureuser/agent-repo
+            PYTHON=$(command -v python3.11 2>/dev/null || command -v python3)
+            $PYTHON -m venv .venv
+            .venv/bin/pip install --upgrade pip -q
+            .venv/bin/pip install -r requirements.txt -q
+            echo "✅ Dépendances installées ($($PYTHON --version))"
+          REMOTE
+
+      - name: Pousser secrets vers Azure Key Vault
+        env:
+          JIRA_URL:       ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT:   ${{ secrets.JIRA_PROJECT_KEY }}
+          OAI_ENDPOINT:   ${{ needs.infra.outputs.openai_endpoint }}
+          OAI_KEY:        ${{ needs.infra.outputs.openai_key }}
+          GH_TOKEN:       ${{ secrets.AGENT_GITHUB_TOKEN }}
+          GH_OWNER:       ${{ secrets.INFRA_GITHUB_OWNER }}
+          KV_NAME:        ${{ secrets.AZURE_KEYVAULT_NAME }}
+        run: |
+          set_secret() {
+            local name="$1" value="$2"
+            if [ -n "$value" ]; then
+              az keyvault secret set --vault-name "$KV_NAME" --name "$name" --value "$value" --output none
+              echo "  ✅ $name"
+            else
+              echo "  ⚠  $name vide — ignoré"
+            fi
+          }
+          echo "🔐 Mise à jour des secrets dans Key Vault : $KV_NAME"
+          set_secret "github-token"          "$GH_TOKEN"
+          set_secret "github-owner"          "$GH_OWNER"
+          set_secret "azure-openai-key"      "$OAI_KEY"
+          set_secret "azure-openai-endpoint" "$OAI_ENDPOINT"
+          set_secret "jira-url"              "$JIRA_URL"
+          set_secret "jira-email"            "$JIRA_EMAIL"
+          set_secret "jira-api-token"        "$JIRA_API_TOKEN"
+          set_secret "jira-project-key"      "$JIRA_PROJECT"
+          echo "✅ Secrets synchronisés dans Key Vault"
+
+      - name: Écrire .env minimal sur la VM (config non-sensible uniquement)
+        env:
+          KV_URL: ${{ secrets.AZURE_KEYVAULT_URL }}
+        run: |
+          {
+            printf 'AZURE_KEYVAULT_URL=%s\n'       "$KV_URL"
+            printf 'USE_KEYVAULT=%s\n'             "true"
+            printf 'AZURE_OPENAI_DEPLOYMENT=%s\n'  "gpt-4o"
+            printf 'AZURE_OPENAI_API_VERSION=%s\n' "2024-12-01-preview"
+            printf 'GITHUB_INFRA_REPO=%s\n'        "infra-provisioned"
+            printf 'DEFAULT_LOCATION=%s\n'         "swedencentral"
+            printf 'DEFAULT_ENVIRONMENT=%s\n'      "dev"
+            printf 'NAMING_PREFIX=%s\n'            "infra-prov"
+          } | ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "azureuser@$VM_IP" \
+                  'cat > /home/azureuser/agent-repo/.env && echo "✅ .env minimal écrit (secrets dans Key Vault)"'
+
+      - name: Fermer règle NSG
+        if: always()
+        run: |
+          az network nsg rule delete \
+            --resource-group "$RG_NAME" --nsg-name "$NSG_NAME" \
+            --name "Allow-GH-Configure-Temp" --output none 2>/dev/null || true
+          echo "✅ Règle NSG fermée"
+
+# =============================================================================
+# JOB 3 — EXÉCUTION DE L'AGENT (manuel uniquement)
+# =============================================================================
+  run-agent:
+    name: "3 · Agent IA — Traitement Ticket Jira"
+    runs-on: ubuntu-latest
+    needs: [infra, configure-vm]
+    if: ${{ inputs.deploy_agent == true }}
+    env:
+      VM_IP:       ${{ needs.infra.outputs.vm_ip }}
+      JIRA_TICKET: ${{ inputs.jira_ticket }}
+
+    steps:
+      - name: Login Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ouvrir SSH — IP runner
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org || curl -sf https://ifconfig.me)
+          az network nsg rule create \
+            --resource-group "$RG_NAME" --nsg-name "$NSG_NAME" \
+            --name "Allow-GH-Run-Temp" --priority 151 \
+            --direction Inbound --protocol Tcp \
+            --destination-port-ranges 22 \
+            --source-address-prefixes "$RUNNER_IP" \
+            --access Allow --output none
+
+      - name: Configurer clé SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Lancer l'Agent IA
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "azureuser@$VM_IP" << REMOTE
+            set -e
+            cd /home/azureuser/agent-repo
+            source .venv/bin/activate
+            export AGENT_CI_MODE=true
+            export AGENT_TICKET="$JIRA_TICKET"
+            python run_agent.py
+          REMOTE
+
+      - name: Fermer règle NSG
+        if: always()
+        run: |
+          az network nsg rule delete \
+            --resource-group "$RG_NAME" --nsg-name "$NSG_NAME" \
+            --name "Allow-GH-Run-Temp" --output none 2>/dev/null || true
+          echo "✅ Règle NSG fermée"
+>>>>>>> 05aa172 (ci cd tf init plan apply)
