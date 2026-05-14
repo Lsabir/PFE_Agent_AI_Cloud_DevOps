@@ -4,7 +4,10 @@
 #   -backend-config="container_name=..." -backend-config="key=terraform.tfstate" \
 #   -backend-config="resource_group_name=..." -backend-config="subscription_id=..."
 terraform {
-  backend "local" {
-    path = "terraform.tfstate"
+  backend "azurerm" {
+    resource_group_name  = "tf-state-rg"
+    storage_account_name = "tfstateagentdevops"
+    container_name       = "tfstate"
+    key                  = "agent-devops.tfstate"
   }
 }
