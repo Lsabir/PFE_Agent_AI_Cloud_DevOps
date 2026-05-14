@@ -15,10 +15,10 @@ jobs:
       contents: read
 
     env:
-      ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      ARM_TENANT_ID:       ${{ secrets.ARM_TENANT_ID }}
+      ARM_CLIENT_ID:       ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+      ARM_CLIENT_SECRET:   ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+      ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+      ARM_TENANT_ID:       ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
 
     steps:
       - name: Checkout
@@ -42,23 +42,23 @@ jobs:
       - name: Terraform Plan
         working-directory: terraform
         env:
-          TF_VAR_ssh_public_key:                  ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_github_actions_principal_id:     ${{ secrets.GH_ACTIONS_PRINCIPAL_ID }}
-          TF_VAR_kv_admin_object_ids:             '["${{ secrets.ADMIN_OBJECT_ID }}"]'
+          TF_VAR_ssh_public_key:              ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_github_actions_principal_id: ${{ secrets.GH_ACTIONS_PRINCIPAL_ID }}
+          TF_VAR_kv_admin_object_ids:         '["${{ secrets.ADMIN_OBJECT_ID }}"]'
         run: terraform plan -out=tfplan
 
       - name: Terraform Apply
         working-directory: terraform
         env:
-          TF_VAR_ssh_public_key:                  ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_github_actions_principal_id:     ${{ secrets.GH_ACTIONS_PRINCIPAL_ID }}
-          TF_VAR_kv_admin_object_ids:             '["${{ secrets.ADMIN_OBJECT_ID }}"]'
+          TF_VAR_ssh_public_key:              ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_github_actions_principal_id: ${{ secrets.GH_ACTIONS_PRINCIPAL_ID }}
+          TF_VAR_kv_admin_object_ids:         '["${{ secrets.ADMIN_OBJECT_ID }}"]'
         run: terraform apply -auto-approve tfplan
 
       - name: Écrire secrets OpenAI dans Key Vault
         working-directory: terraform
         run: |
-          KV_NAME=$(terraform output -raw key_vault_name)
+          KV_NAME="${{ secrets.AZURE_KEYVAULT_NAME }}"
           OAI_KEY=$(terraform output -raw openai_primary_key 2>/dev/null || echo "")
           OAI_EP=$(terraform output -raw openai_endpoint 2>/dev/null || echo "")
 
@@ -80,24 +80,19 @@ jobs:
           echo "Firewall KV fermé"
 
       - name: Résumé infra
+        if: always()
         working-directory: terraform
         run: |
           VM_IP=$(terraform output -raw vm_public_ip 2>/dev/null || echo "N/A")
-          KV_NAME=$(terraform output -raw key_vault_name 2>/dev/null || echo "N/A")
           {
             echo "## Infra déployée"
             echo "| Resource | Valeur |"
             echo "|---|---|"
             echo "| VM IP | \`$VM_IP\` |"
-            echo "| Key Vault | \`$KV_NAME\` |"
+            echo "| Key Vault | \`${{ secrets.AZURE_KEYVAULT_NAME }}\` |"
             echo ""
-            echo "### Connexion SSH à la VM"
+            echo "### Connexion SSH + démarrage agent"
             echo '```bash'
-            echo "ssh -i ~/.ssh/id_ed25519 azureuser@$VM_IP"
-            echo '```'
-            echo ""
-            echo "### Démarrer l'agent"
-            echo '```bash'
-            echo "cd agent-repo && source .venv/bin/activate && python run_agent.py"
+            echo "ssh -i ~/.ssh/id_ed25519 azureuser@$VM_IP -t 'cd agent-repo && source .venv/bin/activate && python run_agent.py'"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
