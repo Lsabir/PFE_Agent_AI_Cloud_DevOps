@@ -4,7 +4,7 @@ resource "azurerm_cognitive_account" "openai" {
   resource_group_name           = var.resource_group_name
   sku_name                      = "S0"
   kind                          = "OpenAI"
-  public_network_access_enabled = false
+  public_network_access_enabled = true
   custom_subdomain_name         = "${var.name_prefix}-openai"
   tags                          = var.tags
 }
