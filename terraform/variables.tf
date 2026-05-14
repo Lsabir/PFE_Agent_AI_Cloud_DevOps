@@ -132,3 +132,9 @@ variable "github_owner" {
   default     = "Lsabir"
 }
 
+variable "kv_admin_object_ids" {
+  description = "Object IDs Entra ID des utilisateurs/groupes admin qui ont Key Vault Secrets Officer (lecture + écriture depuis le portail)."
+  type        = list(string)
+  default     = []
+}
+
