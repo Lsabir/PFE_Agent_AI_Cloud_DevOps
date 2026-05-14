@@ -1,4 +1,4 @@
-name: Terraform Deploy
+name: Terraform Validate
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   terraform:
-    name: "Infra — Terraform Apply"
+    name: "Terraform Plan (validation)"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,6 +39,10 @@ jobs:
         working-directory: terraform
         run: terraform init -reconfigure
 
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
       - name: Terraform Plan
         working-directory: terraform
         env:
@@ -49,58 +53,14 @@ jobs:
           TF_VAR_openai_location:             "swedencentral"
           TF_VAR_openai_model_capacity:       "1"
           TF_VAR_vm_size:                     "Standard_D2as_v4"
-        run: terraform plan -out=tfplan
+        run: terraform plan -no-color 2>&1 | tee /tmp/tfplan.txt
 
-      - name: Terraform Apply
-        working-directory: terraform
-        env:
-          TF_VAR_ssh_public_key:              ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_github_actions_principal_id: ${{ secrets.GH_ACTIONS_PRINCIPAL_ID }}
-          TF_VAR_kv_admin_object_ids:         '["${{ secrets.ADMIN_OBJECT_ID }}"]'
-          TF_VAR_create_openai:               "true"
-          TF_VAR_openai_location:             "swedencentral"
-          TF_VAR_openai_model_capacity:       "1"
-          TF_VAR_vm_size:                     "Standard_D2as_v4"
-        run: terraform apply -auto-approve tfplan
-
-      - name: Écrire secrets OpenAI dans Key Vault
-        working-directory: terraform
-        run: |
-          KV_NAME="${{ secrets.AZURE_KEYVAULT_NAME }}"
-          OAI_KEY=$(terraform output -raw openai_primary_key 2>/dev/null || echo "")
-          OAI_EP=$(terraform output -raw openai_endpoint 2>/dev/null || echo "")
-
-          if [[ -z "$OAI_KEY" ]]; then
-            echo "OpenAI non déployé — secrets non écrits"
-            exit 0
-          fi
-
-          RUNNER_IP=$(curl -sf https://api.ipify.org)
-          echo "Ouverture firewall KV pour $RUNNER_IP..."
-          az keyvault network-rule add --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none
-          sleep 30
-
-          az keyvault secret set --vault-name "$KV_NAME" --name "azure-openai-key"      --value "$OAI_KEY" --output none
-          az keyvault secret set --vault-name "$KV_NAME" --name "azure-openai-endpoint" --value "$OAI_EP" --output none
-          echo "Secrets écrits dans $KV_NAME"
-
-          az keyvault network-rule remove --name "$KV_NAME" --ip-address "$RUNNER_IP" --output none || true
-          echo "Firewall KV fermé"
-
-      - name: Résumé infra
+      - name: Résumé du plan
         if: always()
-        working-directory: terraform
         run: |
-          VM_IP=$(terraform output -raw vm_public_ip 2>/dev/null || echo "N/A")
           {
-            echo "## Infra déployée"
-            echo "| Resource | Valeur |"
-            echo "|---|---|"
-            echo "| VM IP | \`$VM_IP\` |"
-            echo "| Key Vault | \`${{ secrets.AZURE_KEYVAULT_NAME }}\` |"
-            echo ""
-            echo "### Connexion SSH + démarrage agent"
-            echo '```bash'
-            echo "ssh -i ~/.ssh/id_ed25519 azureuser@$VM_IP -t 'cd agent-repo && source .venv/bin/activate && python run_agent.py'"
+            echo "## Terraform Plan"
+            echo '```'
+            grep -E "^(Plan:|No changes\.|Error|  [#+~-])" /tmp/tfplan.txt | head -50
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
