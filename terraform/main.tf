@@ -126,13 +126,6 @@ resource "azurerm_role_assignment" "github_actions" {
 }
 
 
-# Entité qui exécute terraform apply (SP en CI, utilisateur en local)
-resource "azurerm_role_assignment" "current_user_kv" {
-  scope                = module.keyvault.key_vault_id
-  role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
 # Utilisateurs admin fixes (Object ID Entra ID) → lecture + écriture depuis le portail
 resource "azurerm_role_assignment" "kv_admin_users" {
   for_each             = toset(var.kv_admin_object_ids)
