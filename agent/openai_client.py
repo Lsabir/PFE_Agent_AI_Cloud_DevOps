@@ -36,21 +36,19 @@ class InfraAnalysis:
 # ── Système prompt ─────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """
-Tu es un expert Azure et Terraform. Ton rôle est d'analyser des demandes
-d'infrastructure en langage naturel et de produire :
-1. Une analyse JSON structurée des ressources Azure à créer.
-2. Un code Terraform complet, PLAT (sans modules) et conforme aux bonnes pratiques.
+Tu es un expert Azure et Terraform. Tu travailles sur des projets Terraform EXISTANTS.
+Ton rôle est d'analyser des demandes d'infrastructure et de produire uniquement
+le code Terraform NOUVEAU compatible avec le projet existant.
 
 Règles strictes :
 - Utilise toujours azurerm provider >= 3.90 et Terraform >= 1.5
 - Applique des tags sur toutes les ressources (project, environment, owner)
-- N'utilise JAMAIS de modules externes ou locaux. Déclare TOUTES les ressources directement dans main.tf.
-- Nomme les ressources avec un préfixe configurable via variable
-- Externalise toutes les valeurs dans variables.tf avec des descriptions claires
+- Ne duplique JAMAIS les ressources/variables/providers déjà présents dans le projet
+- Nomme les ressources avec un préfixe configurable via variable (réutilise var.naming_prefix si elle existe déjà)
 - Ne mets jamais de secrets ou de mots de passe en dur dans le code
-- Génère un outputs.tf avec les sorties importantes
 - Respecte le principe du moindre privilège pour les rôles RBAC
 - Active soft_delete sur Key Vault, disable public access sur les services sensibles
+- Préfère créer un fichier .tf dédié par feature plutôt que modifier main.tf
 """
 
 
@@ -165,6 +163,8 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
             indent=2
         )
 
+        existing_files = list(existing_tf.keys()) if existing_tf else []
+
         existing_context = ""
         if existing_tf:
             files_summary = "\n\n".join(
@@ -172,49 +172,44 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
                 for fname, content in existing_tf.items()
             )
             existing_context = f"""
-FICHIERS TERRAFORM EXISTANTS (à mettre à jour, ne pas dupliquer les ressources) :
+PROJET TERRAFORM EXISTANT — fichiers déjà présents (NE PAS régénérer) :
+{existing_files}
+
+Contenu des fichiers existants :
 {files_summary}
 
-Fusionne les nouvelles ressources avec l'existant. Conserve les ressources déjà
-présentes telles quelles, ajoute uniquement ce qui est nouveau.
+RÈGLE CRITIQUE : Ne génère PAS les fichiers listés ci-dessus.
+Génère UNIQUEMENT les nouveaux fichiers .tf nécessaires pour les ressources demandées.
+Utilise un nom de fichier descriptif selon la ressource (ex: "storage_backup.tf", "vm_web.tf").
+Si de nouvelles variables sont nécessaires ET que variables.tf existe déjà,
+crée un fichier "{analysis.project_name}_variables.tf" avec seulement les nouvelles variables.
+Réutilise les variables existantes (var.naming_prefix, var.location, var.tags...) sans les redéclarer.
+"""
+        else:
+            existing_context = """
+Génère un projet Terraform complet avec : providers.tf, variables.tf, main.tf, outputs.tf, terraform.tfvars.example
 """
 
         prompt = f"""
-Génère un projet Terraform Azure COMPLET pour les ressources suivantes.
+{'Ajoute au projet Terraform existant' if existing_tf else 'Crée un nouveau projet Terraform Azure pour'} les ressources suivantes.
 {existing_context}
 Projet : {analysis.project_name}
 Environnement : {analysis.environment}
 Région : {analysis.location}
-Préfixe de nommage : {analysis.naming_prefix}
+Préfixe : {analysis.naming_prefix}
 Tags : {json.dumps(analysis.tags)}
 Ressources à créer : {resources_desc}
 
-Génère EXACTEMENT les fichiers suivants, retourne un JSON avec le nom du fichier
-comme clé et le contenu HCL comme valeur :
+Retourne un JSON {{nom_fichier: contenu_hcl}}.
+{"Génère UNIQUEMENT les nouveaux fichiers — pas de doublons avec l'existant." if existing_tf else ""}
 
-{{
-  "providers.tf": "...",
-  "variables.tf": "...",
-  "main.tf": "...",
-  "outputs.tf": "...",
-  "terraform.tfvars.example": "..."
-}}
-
-Règles obligatoires :
-1. providers.tf : azurerm >= 3.90, Terraform >= 1.5, backend azurerm avec
-   commentaire indiquant les variables à renseigner (resource_group_name,
-   storage_account_name, container_name, key)
-2. variables.tf : TOUTES les valeurs configurables en variables avec description,
-   type et default si applicable. NE JAMAIS mettre de secrets comme default.
-3. main.tf : déclare TOUTES les ressources Azure (resource group, vnet, subnets,
-   vm, etc.) directement dans ce fichier. NE PAS utiliser de blocs 'module'.
-   Utilise des locals pour les tags.
-4. outputs.tf : exports utiles (IDs, URIs, IPs, noms)
-5. terraform.tfvars.example : exemple de fichier tfvars avec des valeurs
-   fictives et des commentaires explicatifs. PAS de vraies valeurs sensibles.
-
-Bonne pratique RBAC : si une VM est créée, active SystemAssigned Managed Identity.
-Bonne pratique réseau : si services PaaS, utilise Private Endpoints.
+Règles :
+- azurerm >= 3.90, Terraform >= 1.5
+- Tags sur toutes les ressources
+- Pas de secrets en dur
+- RBAC moindre privilège
+- Private Endpoints pour les services PaaS sensibles
+- SystemAssigned Managed Identity si VM créée
 """
         response = self.client.chat.completions.create(
             model=self.deployment,

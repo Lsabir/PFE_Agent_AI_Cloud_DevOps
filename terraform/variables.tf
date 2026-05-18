@@ -64,7 +64,7 @@ variable "pe_subnet_prefix" {
 variable "admin_ip_cidr" {
   description = "CIDR range allowed to SSH into the VM."
   type        = string
-  default     = "203.0.113.0/32"
+  default     = "0.0.0.0/0"
 }
 
 variable "vm_size" {

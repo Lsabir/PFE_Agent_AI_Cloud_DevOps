@@ -166,32 +166,27 @@ def run_agent() -> None:
         jira.transition_to_todo(issue_key)
         sys.exit(0)
 
-    # ── 4. Analyse par Azure OpenAI ──────────────────────────────────────────
-    section("4. Analyse de la description par Azure OpenAI")
-    print("  Envoi au modèle GPT-4 pour identifier les ressources...")
+    # ── 4. Lecture du projet infra-provisioned + Analyse par Azure OpenAI ───────
+    section("4. Lecture du projet existant + Analyse par Azure OpenAI")
+    print("  Lecture du repo infra-provisioned en cours...")
 
     openai_client = OpenAIClient(config)
     gh_early = GitHubManager(config)
 
-    # Tentative de récupération du contexte existant (best-effort)
     existing_tf: dict = {}
     try:
         gh_early.ensure_repo_exists()
-        # On ne connaît pas encore le project_name → on le déduira après analyse
-        # Première passe sans contexte pour obtenir le project_name
-        analysis_preview = openai_client.analyze_description(description)
-        existing_tf = gh_early.get_existing_context(analysis_preview.project_name)
+        existing_tf = gh_early.get_repo_context()
         if existing_tf:
-            info(f"Contexte existant détecté : {len(existing_tf)} fichier(s) .tf trouvé(s) pour '{analysis_preview.project_name}'.")
+            info(f"Projet existant détecté : {len(existing_tf)} fichier(s) .tf trouvé(s).")
             for fname in existing_tf:
                 print(f"     • {fname}")
-            # Seconde passe avec le contexte pour affiner l'analyse
-            analysis = openai_client.analyze_description(description, existing_tf=existing_tf)
         else:
-            info(f"Aucun fichier .tf existant pour '{analysis_preview.project_name}' — génération complète.")
-            analysis = analysis_preview
+            info("Aucun fichier .tf existant — génération complète du projet.")
+
+        analysis = openai_client.analyze_description(description, existing_tf=existing_tf)
     except Exception as e:
-        print(f"  ❌ Erreur Azure OpenAI : {e}")
+        print(f"  ❌ Erreur : {e}")
         jira.transition_to_todo(issue_key)
         sys.exit(1)
 
@@ -242,16 +237,6 @@ def run_agent() -> None:
         print(f"  ❌ Erreur GitHub : {e}")
         sys.exit(1)
 
-    # Déployer le pipeline standard une seule fois (idempotent)
-    try:
-        created = gh.ensure_standard_pipeline()
-        if created:
-            success("Pipeline Terraform standard créé dans le repo.")
-        else:
-            info("Pipeline Terraform standard déjà présent.")
-    except Exception as e:
-        warn(f"Impossible de vérifier le pipeline standard : {e}")
-
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     branch_name = f"feature/{issue_key}-{analysis.project_name}-{analysis.environment}-{timestamp}"
     info(f"Branche : {branch_name}")
@@ -270,15 +255,13 @@ def run_agent() -> None:
         gh.push_files(
             branch=branch_name,
             files=tf_files,
-            project_name=analysis.project_name,
             commit_message=commit_msg,
         )
     except Exception as e:
         print(f"  ❌ Erreur push : {e}")
         sys.exit(1)
 
-    # Le pipeline standard unique gère automatiquement ce projet
-    info("Le pipeline standard terraform-standard.yml prend en charge ce déploiement.")
+    info("Fichiers poussés dans infra-provisioned — le pipeline existant gère le déploiement.")
 
     # ── 8. Création de la Pull Request ───────────────────────────────────────
     section("8. Création de la Pull Request")

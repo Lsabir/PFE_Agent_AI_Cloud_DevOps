@@ -9,9 +9,7 @@ resource "azurerm_cognitive_account" "openai" {
   tags                          = var.tags
 }
 
-# Azure Cognitive Services reports "created" before the account is fully
-# provisioned. Without this wait, the private endpoint fails with 400
-# AccountProvisioningStateInvalid (state: Accepted).
+
 resource "time_sleep" "wait_for_openai_provisioning" {
   depends_on      = [azurerm_cognitive_account.openai]
   create_duration = "300s"

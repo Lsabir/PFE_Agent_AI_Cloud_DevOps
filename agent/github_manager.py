@@ -84,10 +84,9 @@ class GitHubManager:
         resp.raise_for_status()
         return resp.json()
 
-    def push_files(self, branch: str, files: Dict[str, str], project_name: str, commit_message: str) -> None:
+    def push_files(self, branch: str, files: Dict[str, str], commit_message: str) -> None:
         for filename, content in files.items():
-            path = f"{project_name}/{filename}"
-            self._create_or_update_file(path, content, branch, commit_message)
+            self._create_or_update_file(filename, content, branch, commit_message)
 
     def push_workflow(self, branch: str, workflow_content: str) -> None:
         workflow_name = branch.replace("/", "-")
@@ -189,18 +188,16 @@ class GitHubManager:
         )
         return True
 
-    def get_existing_context(self, project_name: str) -> Dict[str, str]:
-        """Lit les fichiers .tf existants du projet depuis la branche par défaut."""
+    def get_repo_context(self) -> Dict[str, str]:
+        """Lit tous les fichiers .tf existants à la racine du repo infra-provisioned."""
         default_branch = self._get_default_branch()
-        url = f"{self.api_url}/repos/{self.owner}/{self.repo}/contents/{project_name}"
+        url = f"{self.api_url}/repos/{self.owner}/{self.repo}/contents/"
         resp = requests.get(url, headers=self.headers, params={"ref": default_branch})
-        if resp.status_code == 404:
-            return {}
         if not resp.ok:
             return {}
         files = {}
         for item in resp.json():
-            if isinstance(item, dict) and item.get("name", "").endswith(".tf"):
+            if isinstance(item, dict) and item.get("type") == "file" and item.get("name", "").endswith(".tf"):
                 file_resp = requests.get(item["download_url"], headers=self.headers)
                 if file_resp.ok:
                     files[item["name"]] = file_resp.text

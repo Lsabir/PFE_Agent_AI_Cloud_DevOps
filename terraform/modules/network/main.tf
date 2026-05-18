@@ -12,7 +12,6 @@ resource "azurerm_network_security_group" "agent_nsg" {
   location            = var.location
   tags                = var.tags
 
-  # SSH TEMPORAIRE (POC)
   security_rule {
     name                       = "Allow-SSH-From-Admin"
     priority                   = 100
@@ -21,7 +20,7 @@ resource "azurerm_network_security_group" "agent_nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "22"
-    source_address_prefix      = var.admin_ip_cidr
+    source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
 
@@ -37,7 +36,7 @@ resource "azurerm_network_security_group" "agent_nsg" {
     destination_address_prefix = "*"
   }
 
-  # Communication interne (Private Endpoints)
+
   security_rule {
     name                       = "Allow-VNet-Outbound"
     priority                   = 100
@@ -50,7 +49,7 @@ resource "azurerm_network_security_group" "agent_nsg" {
     destination_address_prefix = "VirtualNetwork"
   }
 
-  # Accès Azure DNS
+
   security_rule {
     name                       = "Allow-AzureDNS-Outbound"
     priority                   = 200
@@ -63,7 +62,7 @@ resource "azurerm_network_security_group" "agent_nsg" {
     destination_address_prefix = "168.63.129.16"
   }
 
-  # ✅ ACCÈS APT (HTTP) + JIRA / GITHUB (HTTPS)
+
   security_rule {
     name                       = "Allow-Internet-Http-Outbound"
     priority                   = 290
