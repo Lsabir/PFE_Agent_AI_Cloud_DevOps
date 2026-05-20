@@ -7,11 +7,9 @@ import os
 import sys
 from datetime import datetime
 
-
 _CI = os.getenv("AGENT_CI_MODE", "false").lower() in ("true", "1")
-_SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "false").lower() in ("true", "1"
+_SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "false").lower() in ("true", "1")
 _FORCED_TICKET = os.getenv("AGENT_TICKET", "").strip()
-_AUTO_VALIDATE_PLAN = os.getenv("AGENT_AUTO_VALIDATE_PLAN", "true").lower() in ("true", "1")
 
 from agent.config import load_config
 from agent.openai_client import OpenAIClient
@@ -319,56 +317,23 @@ def run_agent() -> None:
         f"Ressources : {len(analysis.resources)} ressource(s) Azure à provisionner."
     )
 
-    # Mode autonome : continuer directement vers le plan et merge
-    if _CI and _SKIP_VAL:
-        # Mode CI avec validation skip : afficher info et continuer
-        banner("🤖 MODE AUTONOME — Validation automatique en cours...")
-        info(f"PR #{pr_number} créée avec succès.")
-        info(f"Pull Request  : {pr_url}")
-        info(f"Ticket Jira   : {config.jira_url}/browse/{issue_key}")
-        info(f"Ressources    : {len(analysis.resources)} ressource(s) Azure")
-        info("Attente du pipeline Terraform...")
+    # En mode CI sans skip_validation : sortie immédiate après PR, pas d'attente plan.
+    if _CI and not _SKIP_VAL:
+        banner("CI — PR prête, validation humaine requise")
+        print(f"""
+  ✅ PR #{pr_number} créée avec succès.
 
-    # ── 9. Surveillance du pipeline GitHub Actions ────────────────────────────
-    section("9. Surveillance du pipeline GitHub Actions (Terraform Plan)")
-    info(f"PR #{pr_number} : {pr_url}")
-    info("Le pipeline exécute : init → fmt → validate → plan")
+  🔗 Pull Request  : {pr_url}
+  🎫 Ticket Jira   : {config.jira_url}/browse/{issue_key}
+  📋 Ressources    : {len(analysis.resources)} ressource(s) Azure
 
-    completed_run = gh.wait_for_plan_completion(pr_number=pr_number, timeout_minutes=15)
+  Reviewez le Terraform Plan dans les checks GitHub Actions,
+  puis mergez la PR pour déclencher le terraform apply.
+  Le ticket {issue_key} reste en 'In Progress' jusqu'au merge.
+        """)
+        sys.exit(0)
 
-    if completed_run:
-        run_id = completed_run["id"]
-        conclusion = completed_run.get("conclusion", "unknown")
-        run_url = completed_run.get("html_url", "")
-
-        print(f"\n  Pipeline terminé → {conclusion.upper()}")
-        info(f"Voir les détails : {run_url}")
-
-        print("\n  ── Résumé du Terraform Plan ──")
-        plan_output = gh.get_plan_output(run_id)
-        if plan_output:
-            for line in plan_output.split("\n")[:30]:
-                print(f"    {line}")
-
-        if conclusion != "success":
-            warn("Le pipeline a échoué. Vérifiez les logs sur GitHub Actions.")
-            if _AUTO_VALIDATE_PLAN:
-                warn("Mode automatique : tentative de correction...")
-                # Ici on pourrait ajouter une logique de correction automatique
-                # Pour l'instant, on continue
-            elif not ask_confirmation("Voulez-vous quand même continuer vers l'approbation ?", ci_default=False):
-                gh.close_pull_request(pr_number)
-                jira.transition_to_todo(issue_key)
-                jira.add_comment(issue_key, "❌ Pipeline Terraform échoué. Ticket remis en 'To Do'.")
-                print("  → PR fermée. Ticket remis en 'To Do'. Arrêt.")
-                sys.exit(0)
-    else:
-        warn("Timeout : résultats du plan non disponibles.")
-        info(f"Vérifiez manuellement : {pr_url}")
-
-
-
-
+   
     # ── 9. Surveillance du pipeline GitHub Actions ────────────────────────────
     section("9. Surveillance du pipeline GitHub Actions (Terraform Plan)")
     info(f"PR #{pr_number} : {pr_url}")
@@ -403,44 +368,10 @@ def run_agent() -> None:
 
 
 
+        
 
-
-
-
-
-
-
-
-    
-
-    # ── 10. Merge automatique si plan réussit ──────────────────────────────────
-    if _CI and _SKIP_VAL:
-        # Mode autonome : merge automatique après succès du plan
-        approved = conclusion == "success"
-        if approved:
-            info("[AUTONOME] Plan réussi → Merge automatique activé")
-        else:
-            warn("[AUTONOME] Plan échoué → Merge bloqué")
-    else:
-        # Mode interactif : demander validation humaine
-        banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
-        print(f"""
-  Avant de procéder au déploiement, vérifiez :
-
-  1. 👀 Résultats du plan ci-dessus
-  2. 🎫 Ticket Jira    : {config.jira_url}/browse/{issue_key}
-  3. 🔗 Pull Request   : {pr_url}
-  4. 📋 Ressources     : {len(analysis.resources)} ressource(s) Azure à créer
-  5. 🌍 Région         : {analysis.location}
-  6. 🏷  Environnement  : {analysis.environment}
-
-  ⚠  Le merge de la PR déclenchera automatiquement terraform apply
-     sur l'environnement '{analysis.environment}'.
-""")
-        approved = ask_confirmation(
-            "✅ APPROUVEZ-VOUS le déploiement de cette infrastructure ?"
-        )
-        # ── 10. Validation avant merge ───────────────────────────────────────────
+    # ── 10. VALIDATION HUMAINE ────────────────────────────────────────────────
+   # ── 10. Validation avant merge ───────────────────────────────────────────
     banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
     print(f"""
   Avant de procéder au déploiement, vérifiez :
@@ -452,7 +383,9 @@ def run_agent() -> None:
   5. 🌍 Région         : {analysis.location}
   6. 🏷  Environnement  : {analysis.environment}
 
-
+  ⚠  Le merge de la PR déclenchera automatiquement terraform apply
+     sur l'environnement '{analysis.environment}'.
+""")
 
     # ✅ Fix : TOUJOURS demander à l'humain, même en mode _CI
     while True:
