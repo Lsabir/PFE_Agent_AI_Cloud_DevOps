@@ -425,16 +425,17 @@ def run_agent() -> None:
             )
 
             print(f"""
- 
-    🚀 Déploiement lancé !                              
-   Ticket Jira  : {issue_key:<37}│
-    Projet       : {analysis.project_name:<37}│
-    Environnement: {analysis.environment:<37}│
-    SHA merge    : {merge_sha[:8]:<37}│
-    Statut Jira  : Done ✅                              
-                                                       
-    GitHub Actions → terraform apply en cours...        
-
+  ┌──────────────────────────────────────────────────────┐
+  │  🚀 Déploiement lancé !                              │
+  │                                                      │
+  │  Ticket Jira  : {issue_key:<37}│
+  │  Projet       : {analysis.project_name:<37}│
+  │  Environnement: {analysis.environment:<37}│
+  │  SHA merge    : {merge_sha[:8]:<37}│
+  │  Statut Jira  : Done ✅                              │
+  │                                                      │
+  │  GitHub Actions → terraform apply en cours...        │
+  └──────────────────────────────────────────────────────┘
 """)
         except Exception as e:
             print(f"  ❌ Erreur lors du merge : {e}")
