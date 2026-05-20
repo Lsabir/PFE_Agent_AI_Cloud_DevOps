@@ -1,0 +1,107 @@
+# .github/workflows/agent-autonomous.yml
+# Pipeline GitHub Actions pour exécuter l'Agent en mode autonome
+# Déclenché manuellement ou selon une planification
+
+name: 🤖 Agent IA DevOps — Mode Autonome
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: 'Ticket Jira spécifique (optionnel, ex: PM-3)'
+        required: false
+        default: ''
+  schedule:
+    # Exécuter l'agent tous les jours à 09:00 UTC
+    # Ajustez selon vos besoins
+    - cron: '0 9 * * *'
+
+jobs:
+  autonomous-agent:
+    runs-on: ubuntu-latest
+    name: 🚀 Provisioning Autonome
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Installer dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🔐 Charger secrets depuis Key Vault
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: 📝 Récupérer secrets depuis Key Vault
+        run: |
+          az keyvault secret show --name github-token --vault-name agent-devops-kv-pfe2 --query value -o tsv > /tmp/gh_token
+          az keyvault secret show --name jira-token --vault-name agent-devops-kv-pfe2 --query value -o tsv > /tmp/jira_token
+          az keyvault secret show --name openai-key --vault-name agent-devops-kv-pfe2 --query value -o tsv > /tmp/openai_key
+
+      - name: 🤖 Exécuter l'Agent en mode AUTONOME
+        env:
+          # ── Variables de configuration ──
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          
+          # ── Mode autonome activé ──
+          AGENT_CI_MODE: 'true'
+          AGENT_SKIP_VALIDATION: 'true'
+          AGENT_AUTO_VALIDATE_PLAN: 'true'
+          
+          # ── Optionnel : force un ticket spécifique ──
+          # AGENT_TICKET: 'PM-3'
+          
+          # ── Endpoints ──
+          JIRA_URL: 'https://abdessamad1sabir.atlassian.net'
+          AZURE_OPENAI_ENDPOINT: 'https://agent-devops-openai.openai.azure.com/'
+        run: |
+          # Utiliser les secrets depuis Key Vault si disponibles
+          if [ -f /tmp/gh_token ]; then
+            export GITHUB_TOKEN=$(cat /tmp/gh_token)
+          fi
+          if [ -f /tmp/jira_token ]; then
+            export JIRA_TOKEN=$(cat /tmp/jira_token)
+          fi
+          if [ -f /tmp/openai_key ]; then
+            export OPENAI_API_KEY=$(cat /tmp/openai_key)
+          fi
+          
+          # Surcharger AGENT_TICKET si fourni en input
+          if [ -n "${{ github.event.inputs.ticket }}" ]; then
+            export AGENT_TICKET="${{ github.event.inputs.ticket }}"
+            echo "ℹ️  Ticket forcé : $AGENT_TICKET"
+          fi
+          
+          # Lancer l'agent
+          python run_agent.py
+
+      - name: 📊 Résumé d'exécution
+        if: always()
+        run: |
+          echo "✅ Pipeline d'agent autonome terminé"
+          echo "📝 Vérifiez les détails dans les logs ci-dessus"
+          echo "🔗 Consultez les PRs créées sur GitHub"
+          echo "🎫 Consultez les transitions Jira"
+
+      - name: 🔔 Notification de succès
+        if: success()
+        run: |
+          echo "🎉 Agent autonome exécuté avec succès"
+          echo "📦 Ressources générées et déployées"
+
+      - name: ❌ Notification d'erreur
+        if: failure()
+        run: |
+          echo "❌ L'agent autonome a rencontré une erreur"
+          echo "📝 Vérifiez les logs pour plus de détails"
