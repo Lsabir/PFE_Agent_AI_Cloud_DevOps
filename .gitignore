@@ -1,0 +1,32 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+*.tfvars.*
+crash.log
+.override.tf
+.override.tf.json
+*override.tf
+*override.tf.json
+
+# Local Terraform directories
+terraform/.terraform/
+
+# Ignore .DS_Store and other OS files
+.DS_Store
+Thumbs.db
+
+# Visual Studio Code
+.vscode/
+
+
+
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.claude/
+terraform/tfplan
+validate.log

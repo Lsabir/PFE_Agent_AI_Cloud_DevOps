@@ -1,0 +1,16 @@
+# ── Agent IA DevOps — Dépendances Python ──────────────────────────────────────
+
+# Azure OpenAI
+openai>=1.30.0
+
+# Azure Identity (Managed Identity pour Key Vault)
+azure-identity>=1.16.0
+
+# Azure Key Vault (lecture des secrets)
+azure-keyvault-secrets>=4.8.0
+
+# GitHub API + Jira API (REST via requests)
+requests>=2.31.0
+
+# Utilitaires
+python-dotenv>=1.0.0      # chargement du fichier .env en local

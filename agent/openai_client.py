@@ -180,11 +180,18 @@ Contenu des fichiers existants :
 
 RÈGLE CRITIQUE : Ne génère PAS les fichiers listés ci-dessus.
 Génère UNIQUEMENT les nouveaux fichiers .tf nécessaires pour les ressources demandées.
+<<<<<<< HEAD
 Les fichiers seront placés dans le dossier terraform/ du repo (ex: "storage_backup.tf", "vm_web.tf" — sans préfixe terraform/ dans le nom).
 NE PAS régénérer : providers.tf, backend.tf, variables.tf, main.tf, outputs.tf (déjà dans le bootstrap).
 Si de nouvelles variables sont nécessaires, crée "{analysis.project_name}_variables.tf" avec uniquement les nouvelles variables.
 Réutilise var.resource_group_name, var.location, var.naming_prefix, var.common_tags, azurerm_resource_group.rg.
 Référence le resource group existant : resource_group_name = azurerm_resource_group.rg.name
+=======
+Utilise un nom de fichier descriptif selon la ressource (ex: "storage_backup.tf", "vm_web.tf").
+Si de nouvelles variables sont nécessaires ET que variables.tf existe déjà,
+crée un fichier "{analysis.project_name}_variables.tf" avec seulement les nouvelles variables.
+Réutilise les variables existantes (var.naming_prefix, var.location, var.tags...) sans les redéclarer.
+>>>>>>> 09ab011fd74f9934b02a5d2b8cc5928b1dfb7e1b
 """
         else:
             existing_context = """
