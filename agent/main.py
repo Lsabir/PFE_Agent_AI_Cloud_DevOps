@@ -324,18 +324,14 @@ def run_agent() -> None:
     )
 
     # Mode autonome : continuer directement vers le plan et merge
-    # Au lieu de s'arrêter ici
-    if not (_CI and not _SKIP_VAL):
-        # On continue vers le plan (section 9)
-        pass
-    else:
-        # Mode CI sans validation : afficher info et continuer (ne pas exit)
-        banner("CI — PR créée, validation automatique en cours...")
+    if _CI and _SKIP_VAL:
+        # Mode CI avec validation skip : afficher info et continuer
+        banner("🤖 MODE AUTONOME — Validation automatique en cours...")
         info(f"PR #{pr_number} créée avec succès.")
         info(f"Pull Request  : {pr_url}")
         info(f"Ticket Jira   : {config.jira_url}/browse/{issue_key}")
         info(f"Ressources    : {len(analysis.resources)} ressource(s) Azure")
-        info("Démarrage du pipeline Terraform...")
+        info("Attente du pipeline Terraform...")
 
     # ── 9. Surveillance du pipeline GitHub Actions ────────────────────────────
     section("9. Surveillance du pipeline GitHub Actions (Terraform Plan)")
@@ -374,12 +370,16 @@ def run_agent() -> None:
         warn("Timeout : résultats du plan non disponibles.")
         info(f"Vérifiez manuellement : {pr_url}")
 
-    # ── 10. VALIDATION HUMAINE (mode automatique) ────────────────────────────────
+    # ── 10. Merge automatique si plan réussit ──────────────────────────────────
     if _CI and _SKIP_VAL:
-        approved = True
-        info("[AUTONOME] Validation automatique — AGENT_SKIP_VALIDATION=true")
-        info("[AUTONOME] Merge et apply automatiques activés")
+        # Mode autonome : merge automatique après succès du plan
+        approved = conclusion == "success"
+        if approved:
+            info("[AUTONOME] Plan réussi → Merge automatique activé")
+        else:
+            warn("[AUTONOME] Plan échoué → Merge bloqué")
     else:
+        # Mode interactif : demander validation humaine
         banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
         print(f"""
   Avant de procéder au déploiement, vérifiez :
