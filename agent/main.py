@@ -7,13 +7,9 @@ import os
 import sys
 from datetime import datetime
 
-# ── Mode CI (AGENT_CI_MODE=true) ─────────────────────────────────────────────
-# Activé par le pipeline GitHub Actions pour un fonctionnement sans interaction.
-#   AGENT_TICKET          : clé Jira forcée (ex: PM-5), sinon premier disponible
-#   AGENT_SKIP_VALIDATION : "true" pour merger automatiquement sans validation
-# Mode automatique : active l'autonomie totale
-_CI = os.getenv("AGENT_CI_MODE", "true").lower() in ("true", "1")
-_SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "true").lower() in ("true", "1")
+
+_CI = os.getenv("AGENT_CI_MODE", "false").lower() in ("true", "1")
+_SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "false").lower() in ("true", "1"
 _FORCED_TICKET = os.getenv("AGENT_TICKET", "").strip()
 _AUTO_VALIDATE_PLAN = os.getenv("AGENT_AUTO_VALIDATE_PLAN", "true").lower() in ("true", "1")
 
@@ -370,6 +366,53 @@ def run_agent() -> None:
         warn("Timeout : résultats du plan non disponibles.")
         info(f"Vérifiez manuellement : {pr_url}")
 
+
+
+
+    # ── 9. Surveillance du pipeline GitHub Actions ────────────────────────────
+    section("9. Surveillance du pipeline GitHub Actions (Terraform Plan)")
+    info(f"PR #{pr_number} : {pr_url}")
+    info("Le pipeline exécute : init → fmt → validate → plan")
+
+    # ✅ Fix : valeur par défaut pour éviter NameError
+    conclusion = "unknown"
+
+    completed_run = gh.wait_for_plan_completion(pr_number=pr_number, timeout_minutes=15)
+
+    if completed_run:
+        run_id = completed_run["id"]
+        conclusion = completed_run.get("conclusion", "unknown")
+        run_url = completed_run.get("html_url", "")
+
+        print(f"\n  Pipeline terminé → {conclusion.upper()}")
+        info(f"Voir les détails : {run_url}")
+
+        print("\n  ── Résumé du Terraform Plan ──")
+        plan_output = gh.get_plan_output(run_id)
+        if plan_output:
+            for line in plan_output.split("\n")[:30]:
+                print(f"    {line}")
+
+        if conclusion != "success":
+            warn("Le pipeline a échoué. Vérifiez les logs sur GitHub Actions.")
+    else:
+        # ✅ Fix : timeout → ne pas crasher, demander à l'humain
+        warn("Timeout : résultats du plan non disponibles dans le délai imparti.")
+        info(f"Vérifiez manuellement : {pr_url}")
+        warn("Le plan n'a pas pu être vérifié automatiquement.")
+
+
+
+
+
+
+
+
+
+
+
+    
+
     # ── 10. Merge automatique si plan réussit ──────────────────────────────────
     if _CI and _SKIP_VAL:
         # Mode autonome : merge automatique après succès du plan
@@ -397,6 +440,30 @@ def run_agent() -> None:
         approved = ask_confirmation(
             "✅ APPROUVEZ-VOUS le déploiement de cette infrastructure ?"
         )
+        # ── 10. Validation avant merge ───────────────────────────────────────────
+    banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
+    print(f"""
+  Avant de procéder au déploiement, vérifiez :
+
+  1. 👀 Résultats du plan ci-dessus (conclusion : {conclusion.upper()})
+  2. 🎫 Ticket Jira    : {config.jira_url}/browse/{issue_key}
+  3. 🔗 Pull Request   : {pr_url}
+  4. 📋 Ressources     : {len(analysis.resources)} ressource(s) Azure à créer
+  5. 🌍 Région         : {analysis.location}
+  6. 🏷  Environnement  : {analysis.environment}
+
+
+
+    # ✅ Fix : TOUJOURS demander à l'humain, même en mode _CI
+    while True:
+        answer = input("  ❓ Approuvez-vous le déploiement ? [oui/non] : ").strip().lower()
+        if answer in ("oui", "o", "yes", "y"):
+            approved = True
+            break
+        if answer in ("non", "n", "no"):
+            approved = False
+            break
+        print("  → Répondez 'oui' ou 'non'.")
 
     # ── 11. Merge ou Refus ───────────────────────────────────────────────────
     if approved:
