@@ -62,38 +62,51 @@ RÈGLES CRITIQUES SUR LES DÉPENDANCES :
 - Si tu crées azurerm_virtual_network → tu DOIS créer azurerm_resource_group (sauf s'il existe dans existing_tf)
 - N'invente jamais qu'une ressource Azure "existe déjà" si elle n'est pas dans existing_tf
 
-RESSOURCES QUI NE SUPPORTENT PAS tags — NE JAMAIS METTRE tags DESSUS :
-- azurerm_subnet
-- azurerm_network_security_rule
-- azurerm_route
-- azurerm_role_assignment
-- azurerm_private_dns_zone_virtual_network_link
-- azurerm_subnet_network_security_group_association
-- azurerm_virtual_network_peering
-- azurerm_network_interface_security_group_association
-- azurerm_network_interface_backend_address_pool_association
+ATTRIBUTS INTERDITS PAR RESSOURCE — NE JAMAIS UTILISER CES ATTRIBUTS :
+- azurerm_subnet : PAS de tags, PAS de private_endpoint_network_policies_enabled,
+  PAS de enforce_private_link_endpoint_network_policies, PAS de enforce_private_link_service_network_policies
+- azurerm_network_security_rule : PAS de tags
+- azurerm_route : PAS de tags
+- azurerm_role_assignment : PAS de tags, PAS de scope (utiliser scope comme argument positionnel)
+- azurerm_private_dns_zone_virtual_network_link : PAS de tags
+- azurerm_subnet_network_security_group_association : PAS de tags
+- azurerm_virtual_network_peering : PAS de tags
+- azurerm_network_interface_security_group_association : PAS de tags
+- azurerm_lb_backend_address_pool_association : PAS de tags
+
+VERSION PROVIDER AZURERM : utilise TOUJOURS ~> 3.90 (pas >= 3.90) pour rester sur la 3.x
 """
 
 
 # ── Post-traitement déterministe (couche 2) ────────────────────────────────────
 
-_NO_TAGS_RESOURCES: frozenset[str] = frozenset({
-    "azurerm_subnet",
-    "azurerm_network_security_rule",
-    "azurerm_route",
-    "azurerm_role_assignment",
-    "azurerm_private_dns_zone_virtual_network_link",
-    "azurerm_subnet_network_security_group_association",
-    "azurerm_virtual_network_peering",
-    "azurerm_network_interface_security_group_association",
-    "azurerm_network_interface_backend_address_pool_association",
-    "azurerm_lb_backend_address_pool_association",
-})
+# Attributs invalides par type de ressource azurerm (supprimés automatiquement)
+_INVALID_ATTRIBUTES: dict[str, frozenset[str]] = {
+    "azurerm_subnet": frozenset({
+        "tags",
+        "private_endpoint_network_policies_enabled",       # supprimé en azurerm 4.x
+        "enforce_private_link_endpoint_network_policies",  # déprécié en azurerm 3.x
+        "enforce_private_link_service_network_policies",   # déprécié en azurerm 3.x
+    }),
+    "azurerm_network_security_rule": frozenset({"tags"}),
+    "azurerm_route": frozenset({"tags"}),
+    "azurerm_role_assignment": frozenset({"tags"}),
+    "azurerm_private_dns_zone_virtual_network_link": frozenset({"tags"}),
+    "azurerm_subnet_network_security_group_association": frozenset({"tags"}),
+    "azurerm_virtual_network_peering": frozenset({"tags"}),
+    "azurerm_network_interface_security_group_association": frozenset({"tags"}),
+    "azurerm_network_interface_backend_address_pool_association": frozenset({"tags"}),
+    "azurerm_lb_backend_address_pool_association": frozenset({"tags"}),
+}
+
+# Regex pour détecter le nom de l'attribut sur une ligne HCL
+_ATTR_RE = re.compile(r"^\s*([\w]+)\s*=")
 
 
 def _fix_tf_content(content: str) -> tuple[str, list[str]]:
     """
     Corrige les erreurs connues dans un contenu HCL.
+    Supprime les attributs invalides listés dans _INVALID_ATTRIBUTES.
     Retourne (contenu_corrigé, liste_des_corrections).
     """
     lines = content.split("\n")
@@ -120,12 +133,16 @@ def _fix_tf_content(content: str) -> tuple[str, list[str]]:
                 result.append(line)
                 continue
 
-            # Supprimer tags sur les ressources qui ne le supportent pas
-            if current_resource in _NO_TAGS_RESOURCES and re.match(r"\s*tags\s*=", line):
-                fixes.append(
-                    f"L{lineno}: tags supprimé de '{current_resource}' (non supporté par azurerm)"
-                )
-                continue
+            # Supprimer les attributs invalides pour ce type de ressource
+            invalid = _INVALID_ATTRIBUTES.get(current_resource)
+            if invalid:
+                attr_match = _ATTR_RE.match(line)
+                if attr_match and attr_match.group(1) in invalid:
+                    fixes.append(
+                        f"L{lineno}: '{attr_match.group(1)}' supprimé de '{current_resource}'"
+                        f" (attribut non supporté par azurerm)"
+                    )
+                    continue
 
         result.append(line)
 
@@ -356,9 +373,11 @@ Vérifie OBLIGATOIREMENT ces points et CORRIGE tout ce qui est incorrect :
    - resource_group_name = "nom-en-dur" → remplacer par azurerm_resource_group.XXXX.name
    - Tout attribut qui référence une autre ressource Azure doit utiliser une référence Terraform
 
-3. ATTRIBUTS INVALIDES
-   - azurerm_subnet, azurerm_network_security_rule, azurerm_route, azurerm_role_assignment
-     ne supportent PAS tags → supprimer l'attribut tags s'il est présent
+3. ATTRIBUTS INVALIDES À SUPPRIMER
+   - azurerm_subnet : supprimer tags, private_endpoint_network_policies_enabled,
+     enforce_private_link_endpoint_network_policies, enforce_private_link_service_network_policies
+   - azurerm_network_security_rule, azurerm_route, azurerm_role_assignment : supprimer tags
+   - azurerm_virtual_network_peering, azurerm_subnet_network_security_group_association : supprimer tags
 
 4. COMPLETUDE
    - Toutes les variables utilisées (var.X) doivent être déclarées dans variables.tf avec un default
