@@ -112,10 +112,9 @@ class GitHubManager:
         commit_message: str,
         issue_key: str = "ticket",
     ) -> List[str]:
-        """Pousse les .tf générés. Retourne la liste des chemins poussés."""
-        protected = {"providers.tf", "backend.tf", "variables.tf", "main.tf", "outputs.tf", "network.tf"}
+        """Met à jour les fichiers .tf existants sur la branche (pas de nouveaux fichiers ticket)."""
+        forbidden = {"providers.tf", "backend.tf"}
         pushed: List[str] = []
-        ticket_slug = issue_key.lower().replace("-", "")
 
         for filename, content in files.items():
             if filename == "README.md":
@@ -125,19 +124,17 @@ class GitHubManager:
             if not filename.endswith(".tf"):
                 continue
             base = filename.split("/")[-1]
-            if base in protected:
-                # Renommer au lieu d'ignorer (évite de perdre le code du ticket)
-                base = f"{ticket_slug}_{base.replace('.tf', '')}.tf"
-            if not base.startswith(ticket_slug) and not base.startswith(issue_key.lower()):
-                base = f"{issue_key.lower()}_{base}"
-            path = f"{TF_ROOT}/{base}"
+            if base in forbidden:
+                continue
+            path = self._normalize_tf_path(base)
             self._create_or_update_file(path, content, branch, commit_message)
             pushed.append(path)
 
-        if not pushed:
+        tf_pushed = [p for p in pushed if p.endswith(".tf")]
+        if not tf_pushed:
             raise RuntimeError(
-                "Aucun fichier .tf poussé sur GitHub. L'IA a peut-être généré main.tf/providers.tf "
-                "au lieu d'un fichier dédié (ex: pm5_vm.tf). Relancez le ticket."
+                "Aucun fichier .tf modifié sur GitHub. L'agent doit retourner des fichiers "
+                "existants modifiés (main.tf, network.tf, variables.tf, outputs.tf)."
             )
         return pushed
 

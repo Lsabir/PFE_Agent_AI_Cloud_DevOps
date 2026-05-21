@@ -35,24 +35,26 @@ class InfraAnalysis:
 
 # ── Système prompt ─────────────────────────────────────────────────────────────
 
+# Fichiers que l'agent peut modifier (jamais providers/backend = state & auth)
+EDITABLE_TF_FILES = ("main.tf", "variables.tf", "outputs.tf", "network.tf")
+
 SYSTEM_PROMPT = """
-Tu es un expert Azure et Terraform. Tu travailles sur des projets Terraform EXISTANTS.
-Ton rôle est d'analyser des demandes d'infrastructure et de produire uniquement
-le code Terraform NOUVEAU compatible avec le projet existant.
+Tu es un expert Azure et Terraform. Tu MODIFIES un projet Terraform EXISTANT
+pour réaliser une demande Jira — tu n'ajoutes pas de nouveaux fichiers .tf séparés.
 
 Règles strictes :
-- Utilise toujours azurerm provider >= 3.90 et Terraform >= 1.5
-- Applique des tags sur toutes les ressources via merge(var.common_tags, {...})
-- Ne duplique JAMAIS les ressources déjà dans le projet (azurerm_resource_group.rg existe déjà)
-- Ne génère JAMAIS providers.tf, backend.tf, variables.tf, main.tf, outputs.tf
-- Crée UN fichier .tf par ticket : ex. "pm5_vm.tf", "pm5_storage.tf" (nom en minuscules, sans espaces)
-- Resource group : TOUJOURS utiliser azurerm_resource_group.rg.name et .location (déjà dans main.tf)
-- Location : var.location
+- azurerm >= 3.90, Terraform >= 1.5
+- MODIFIE uniquement les fichiers existants pertinents : main.tf, variables.tf, outputs.tf, network.tf
+- Ne modifie JAMAIS providers.tf ni backend.tf
+- Retourne le contenu COMPLET de chaque fichier modifié (fichier entier, pas un extrait ni un patch)
+- CONSERVE tout le code existant non concerné par le ticket ; ajoute/fusionne proprement
+- Ne duplique pas azurerm_resource_group.rg s'il existe déjà
 - Tags : merge(var.common_tags, { environment = var.environment })
-- VM Linux : nécessite VNet/subnet — réutilise azurerm_virtual_network.vnet et azurerm_subnet.agent si présents dans network.tf, sinon crée-les dans le même fichier ticket
-- VM : admin_ssh_key { username = "azureuser" public_key = var.ssh_public_key }
-- Storage : resource_group_name = azurerm_resource_group.rg.name
-- Pas de secrets en dur ; pas de provider/version blocks dans les fichiers ticket
+- VM : réutilise azurerm_virtual_network.vnet / azurerm_subnet.agent de network.tf ; sinon complète network.tf
+- VM : admin_ssh_key avec var.ssh_public_key, username "azureuser"
+- Nouvelles variables → ajoute dans variables.tf (ne supprime pas les variables existantes)
+- Nouveaux outputs → ajoute dans outputs.tf
+- Pas de secrets en dur ; pas de blocs terraform/provider dans main.tf/network.tf
 """
 
 
@@ -180,19 +182,23 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
                 f"### {fname}\n```hcl\n{content}\n```"
                 for fname, content in existing_tf.items()
             )
+            editable = [f for f in existing_files if f in EDITABLE_TF_FILES or f not in ("providers.tf", "backend.tf")]
             existing_context = f"""
-PROJET TERRAFORM EXISTANT — fichiers déjà présents (NE PAS régénérer) :
+PROJET TERRAFORM EXISTANT — tu dois MODIFIER ces fichiers en place (pas de nouveaux fichiers .tf) :
 {existing_files}
 
-Contenu des fichiers existants :
+Fichiers modifiables pour ce ticket : {editable}
+Interdit de modifier : providers.tf, backend.tf
+
+Contenu actuel (à préserver et étendre) :
 {files_summary}
 
-RÈGLE CRITIQUE : Ne génère PAS les fichiers listés ci-dessus.
-Génère UNIQUEMENT des fichiers .tf NOUVEAUX nommés comme "{issue_key.lower()}_{{ressource}}.tf" (ex: {issue_key.lower()}_vm.tf).
-NE PAS nommer les fichiers : main.tf, providers.tf, backend.tf, variables.tf, outputs.tf.
-Réutilise OBLIGATOIREMENT : azurerm_resource_group.rg, var.location, var.common_tags, var.naming_prefix, var.ssh_public_key (pour VM).
-Si network.tf existe : réutilise azurerm_virtual_network.vnet et azurerm_subnet.agent pour les VM.
-Si de nouvelles variables sont nécessaires : fichier "{issue_key.lower()}_variables.tf" uniquement.
+RÈGLE CRITIQUE :
+- Retourne un JSON {{nom_fichier: contenu_hcl_complet}} UNIQUEMENT pour les fichiers que tu as modifiés.
+- Chaque valeur = fichier ENTIER prêt pour terraform validate (pas de fragment, pas de "...").
+- Ticket Jira : {issue_key} — intègre les ressources demandées dans la structure existante.
+- VM/storage/etc. → main.tf et/ou network.tf ; variables dans variables.tf ; outputs dans outputs.tf.
+- Réutilise : azurerm_resource_group.rg, var.location, var.common_tags, var.naming_prefix.
 """
         else:
             existing_context = """
@@ -200,19 +206,17 @@ Génère un projet Terraform complet avec : providers.tf, variables.tf, main.tf,
 """
 
         prompt = f"""
-{'Ajoute au projet Terraform existant' if existing_tf else 'Crée un nouveau projet Terraform Azure pour'} les ressources suivantes.
+{'Modifie le projet Terraform existant' if existing_tf else 'Crée un nouveau projet Terraform Azure'} pour réaliser ce ticket Jira.
 {existing_context}
 Projet : {analysis.project_name}
 Environnement : {analysis.environment}
 Région : {analysis.location}
 Préfixe : {analysis.naming_prefix}
 Tags : {json.dumps(analysis.tags)}
-Ressources à créer : {resources_desc}
+Ressources demandées : {resources_desc}
 
-Retourne un JSON {{nom_fichier: contenu_hcl}} avec AU MOINS un fichier .tf contenant les ressources demandées.
-Clés JSON = noms de fichiers SANS préfixe terraform/ (ex: "pm5_vm.tf" pas "terraform/pm5_vm.tf").
-
-{"Génère UNIQUEMENT les nouveaux fichiers — pas de doublons avec l'existant." if existing_tf else ""}
+Retourne un JSON {{nom_fichier: contenu_hcl}}.
+{"Clés = noms de fichiers EXISTANTS modifiés (ex: main.tf, network.tf, variables.tf). Pas de nouveau fichier pm5_xxx.tf." if existing_tf else "Crée providers.tf, variables.tf, main.tf, outputs.tf, network.tf si besoin."}
 """
         response = self.client.chat.completions.create(
             model=self.deployment,
@@ -221,7 +225,7 @@ Clés JSON = noms de fichiers SANS préfixe terraform/ (ex: "pm5_vm.tf" pas "ter
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=4000,
+            max_tokens=8000,
             response_format={"type": "json_object"},
         )
 

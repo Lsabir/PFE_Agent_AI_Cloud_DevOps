@@ -216,7 +216,7 @@ def run_agent() -> None:
         print(f"  ❌ Erreur génération Terraform : {e}")
         sys.exit(1)
 
-    success(f"{len(tf_files)} fichiers générés :")
+    success(f"{len(tf_files)} fichier(s) Terraform (modifications) :")
     for fname in tf_files:
         print(f"     • {fname}")
 
@@ -270,10 +270,10 @@ def run_agent() -> None:
         print(f"  ❌ Erreur push : {e}")
         sys.exit(1)
 
-    success(f"{len(pushed_paths)} fichier(s) poussé(s) sur la branche {branch_name} :")
+    success(f"{len(pushed_paths)} fichier(s) modifié(s) sur la branche {branch_name} :")
     for p in pushed_paths:
         print(f"     • {p}")
-    info("Après MERGE de la PR sur main, le pipeline Apply créera les ressources dans Azure.")
+    info("Modifications dans le projet existant — merge PR → terraform apply sur infra-provisioned.")
 
     # ── 8. Création de la Pull Request ───────────────────────────────────────
     section("8. Création de la Pull Request")
