@@ -1,11 +1,16 @@
 """
 openai_client.py — Interface avec Azure OpenAI
 Analyse la description, identifie les ressources et génère le code Terraform.
+
+Pipeline de génération en 3 couches :
+  1. LLM génère le code (generate_terraform)
+  2. Post-traitement Python déterministe (_post_process) : corrige les erreurs connues sans LLM
+  3. Second appel LLM de validation (_validate_and_correct) : vérifie les dépendances
 """
 
 import json
+import re
 from dataclasses import dataclass, field
-from typing import Optional
 from openai import AzureOpenAI
 
 from agent.config import AgentConfig
@@ -15,19 +20,17 @@ from agent.config import AgentConfig
 
 @dataclass
 class ResourceSpec:
-    """Représente une ressource Azure identifiée depuis la description."""
-    type: str           # "vm", "database", "storage", "network", "keyvault", "openai"
-    name: str           # nom logique
+    type: str
+    name: str
     parameters: dict = field(default_factory=dict)
 
 
 @dataclass
 class InfraAnalysis:
-    """Résultat de l'analyse de la description par le LLM."""
-    summary: str                              # résumé humain de ce qui sera créé
-    project_name: str                         # nom du projet (slug)
-    environment: str                          # dev / staging / prod
-    location: str                             # région Azure
+    summary: str
+    project_name: str
+    environment: str
+    location: str
     resources: list[ResourceSpec] = field(default_factory=list)
     naming_prefix: str = "infra-prov"
     tags: dict = field(default_factory=dict)
@@ -37,39 +40,117 @@ class InfraAnalysis:
 
 SYSTEM_PROMPT = """
 Tu es un expert Azure et Terraform. Tu travailles sur des projets Terraform EXISTANTS.
-Ton rôle est d'analyser des demandes d'infrastructure et de produire le code Terraform
-MODIFIÉ ou NOUVEAU, compatible avec le projet existant.
+Ton rôle est de produire du code Terraform VALIDE, COMPLET et COMPATIBLE avec le projet existant.
 
-Règles strictes :
+Règles générales :
 - Utilise toujours azurerm provider >= 3.90 et Terraform >= 1.5
-- Applique des tags sur toutes les ressources (project, environment, owner)
+- Applique des tags sur toutes les ressources QUI LE SUPPORTENT (voir liste ci-dessous)
 - Ne duplique JAMAIS les ressources/variables/providers déjà présents dans le projet
-- Nomme les ressources avec un préfixe configurable via variable (réutilise var.naming_prefix si elle existe déjà)
+- Réutilise var.naming_prefix, var.location, var.tags si ces variables existent déjà
 - Ne mets jamais de secrets ou de mots de passe en dur dans le code
 - Respecte le principe du moindre privilège pour les rôles RBAC
 - Active soft_delete sur Key Vault, disable public access sur les services sensibles
-- Quand des fichiers .tf existent déjà, MODIFIE-LES directement pour y intégrer les nouvelles ressources
-- Ne crée PAS de nouveau fichier séparé si les nouvelles ressources peuvent être ajoutées dans main.tf ou variables.tf existants
+- Quand des fichiers .tf existent déjà, MODIFIE-LES pour y intégrer les nouvelles ressources
 - Toutes les variables déclarées doivent avoir une valeur par défaut (default = "...")
-- Ne génère JAMAIS de bloc backend dans providers.tf (le backend est géré par le pipeline CI/CD)
+- Ne génère JAMAIS de bloc backend dans providers.tf
 
-RÈGLES CRITIQUES SUR LES DÉPENDANCES — NE JAMAIS VIOLER :
-- JAMAIS de nom de ressource Azure écrit en dur dans un attribut de référence (ex: virtual_network_name = "vnet-existing" est INTERDIT)
-- Utilise TOUJOURS les références Terraform : virtual_network_name = azurerm_virtual_network.main.name
-- Si tu crées un subnet, tu DOIS créer le azurerm_virtual_network dans le même code
-- Si tu crées une ressource qui dépend d'un resource group, tu DOIS créer le azurerm_resource_group dans le même code (sauf s'il existe déjà dans existing_tf)
-- Si tu crées une resource qui dépend d'un VNet et que ce VNet N'EST PAS dans existing_tf, tu DOIS le créer
+RÈGLES CRITIQUES SUR LES DÉPENDANCES :
+- JAMAIS de nom de ressource Azure écrit en dur dans un attribut de référence
+  INTERDIT : virtual_network_name = "vnet-existing"
+  CORRECT  : virtual_network_name = azurerm_virtual_network.main.name
+- Si tu crées azurerm_subnet → tu DOIS créer azurerm_virtual_network dans le même fichier
+- Si tu crées azurerm_virtual_network → tu DOIS créer azurerm_resource_group (sauf s'il existe dans existing_tf)
 - N'invente jamais qu'une ressource Azure "existe déjà" si elle n'est pas dans existing_tf
 
-RESSOURCES AZURE QUI NE SUPPORTENT PAS `tags` — NE JAMAIS METTRE tags SUR CES RESSOURCES :
-- azurerm_subnet (PAS de tags)
-- azurerm_network_security_rule (PAS de tags — mettre tags sur azurerm_network_security_group)
-- azurerm_route (PAS de tags — mettre tags sur azurerm_route_table)
-- azurerm_role_assignment (PAS de tags)
-- azurerm_private_dns_zone_virtual_network_link (PAS de tags)
-- azurerm_subnet_network_security_group_association (PAS de tags)
-- azurerm_virtual_network_peering (PAS de tags)
+RESSOURCES QUI NE SUPPORTENT PAS tags — NE JAMAIS METTRE tags DESSUS :
+- azurerm_subnet
+- azurerm_network_security_rule
+- azurerm_route
+- azurerm_role_assignment
+- azurerm_private_dns_zone_virtual_network_link
+- azurerm_subnet_network_security_group_association
+- azurerm_virtual_network_peering
+- azurerm_network_interface_security_group_association
+- azurerm_network_interface_backend_address_pool_association
 """
+
+
+# ── Post-traitement déterministe (couche 2) ────────────────────────────────────
+
+_NO_TAGS_RESOURCES: frozenset[str] = frozenset({
+    "azurerm_subnet",
+    "azurerm_network_security_rule",
+    "azurerm_route",
+    "azurerm_role_assignment",
+    "azurerm_private_dns_zone_virtual_network_link",
+    "azurerm_subnet_network_security_group_association",
+    "azurerm_virtual_network_peering",
+    "azurerm_network_interface_security_group_association",
+    "azurerm_network_interface_backend_address_pool_association",
+    "azurerm_lb_backend_address_pool_association",
+})
+
+
+def _fix_tf_content(content: str) -> tuple[str, list[str]]:
+    """
+    Corrige les erreurs connues dans un contenu HCL.
+    Retourne (contenu_corrigé, liste_des_corrections).
+    """
+    lines = content.split("\n")
+    result: list[str] = []
+    fixes: list[str] = []
+
+    current_resource: str | None = None
+    depth = 0
+
+    for lineno, line in enumerate(lines, 1):
+        # Détecter l'ouverture d'un bloc resource
+        m = re.match(r'\s*resource\s+"(\w+)"\s+"\w+"\s*\{', line)
+        if m:
+            current_resource = m.group(1)
+            depth = 1
+            result.append(line)
+            continue
+
+        if current_resource is not None:
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                current_resource = None
+                depth = 0
+                result.append(line)
+                continue
+
+            # Supprimer tags sur les ressources qui ne le supportent pas
+            if current_resource in _NO_TAGS_RESOURCES and re.match(r"\s*tags\s*=", line):
+                fixes.append(
+                    f"L{lineno}: tags supprimé de '{current_resource}' (non supporté par azurerm)"
+                )
+                continue
+
+        result.append(line)
+
+    return "\n".join(result), fixes
+
+
+def _post_process(files: dict[str, str]) -> dict[str, str]:
+    """Applique _fix_tf_content sur tous les fichiers .tf et affiche un rapport."""
+    corrected: dict[str, str] = {}
+    all_fixes: list[str] = []
+
+    for fname, content in files.items():
+        if fname.endswith(".tf"):
+            fixed, fixes = _fix_tf_content(content)
+            corrected[fname] = fixed
+            all_fixes.extend(f"[{fname}] {f}" for f in fixes)
+        else:
+            corrected[fname] = content
+
+    if all_fixes:
+        print(f"\n  🔧 Post-traitement — {len(all_fixes)} correction(s) automatique(s) :")
+        for fix in all_fixes:
+            print(f"     • {fix}")
+
+    return corrected
 
 
 # ── Client OpenAI ──────────────────────────────────────────────────────────────
@@ -85,14 +166,13 @@ class OpenAIClient:
         self.deployment = config.azure_openai_deployment
         self.config = config
 
-    # ── Analyse de la description ──────────────────────────────────────────────
+    # ── Couche 1 : Analyse de la description ──────────────────────────────────
 
-    def analyze_description(self, description: str, existing_tf: dict[str, str] | None = None) -> InfraAnalysis:
-        """
-        Envoie la description au LLM et récupère une analyse JSON structurée
-        des ressources Azure à créer.
-        existing_tf : fichiers .tf existants du projet (peut être vide ou None).
-        """
+    def analyze_description(
+        self,
+        description: str,
+        existing_tf: dict[str, str] | None = None,
+    ) -> InfraAnalysis:
         existing_context = ""
         if existing_tf:
             files_summary = "\n\n".join(
@@ -103,8 +183,7 @@ class OpenAIClient:
 CONTEXTE — Infrastructure déjà déployée dans ce projet :
 {files_summary}
 
-Tiens compte de ces ressources existantes : ne les recrée pas, réutilise leurs
-noms/IDs si la nouvelle demande en dépend, et signale toute mise à jour nécessaire.
+Ne recrée pas ces ressources. Réutilise leurs noms/IDs si nécessaire.
 """
 
         prompt = f"""
@@ -124,11 +203,7 @@ Format JSON attendu :
     {{
       "type": "vm|database|storage|network|keyvault|openai|container|aks",
       "name": "nom-logique",
-      "parameters": {{
-        "vm_size": "Standard_B2s",
-        "os": "ubuntu-22.04",
-        "...": "..."
-      }}
+      "parameters": {{"vm_size": "Standard_B2s", "os": "ubuntu-22.04"}}
     }}
   ]
 }}
@@ -146,19 +221,11 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
             response_format={"type": "json_object"},
         )
 
-        raw = response.choices[0].message.content
-        data = json.loads(raw)
-        
-
+        data = json.loads(response.choices[0].message.content)
         resources = [
-            ResourceSpec(
-                type=r["type"],
-                name=r["name"],
-                parameters=r.get("parameters", {}),
-            )
+            ResourceSpec(type=r["type"], name=r["name"], parameters=r.get("parameters", {}))
             for r in data.get("resources", [])
         ]
-
         return InfraAnalysis(
             summary=data.get("summary", ""),
             project_name=data.get("project_name", "infra-projet"),
@@ -169,21 +236,25 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
             resources=resources,
         )
 
-    # ── Génération du code Terraform ───────────────────────────────────────────
+    # ── Couche 1 : Génération du code Terraform ────────────────────────────────
 
-    def generate_terraform(self, analysis: InfraAnalysis, existing_tf: dict[str, str] | None = None) -> dict[str, str]:
+    def generate_terraform(
+        self,
+        analysis: InfraAnalysis,
+        existing_tf: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """
-        Génère les fichiers Terraform complets basés sur l'analyse.
-        Retourne un dict {nom_fichier: contenu}.
-        existing_tf : fichiers .tf existants à fusionner/mettre à jour.
+        Génère les fichiers Terraform en 3 couches :
+          1. LLM génère le code
+          2. Post-traitement Python (corrections déterministes)
+          3. Second LLM de validation (dépendances, références)
         """
         resources_desc = json.dumps(
             [{"type": r.type, "name": r.name, "parameters": r.parameters}
              for r in analysis.resources],
-            indent=2
+            indent=2,
         )
 
-        existing_context = ""
         if existing_tf:
             files_summary = "\n\n".join(
                 f"### {fname}\n```hcl\n{content}\n```"
@@ -194,49 +265,40 @@ PROJET TERRAFORM EXISTANT — lis TOUT le code ci-dessous avant de générer quo
 
 {files_summary}
 
-RÈGLES CRITIQUES :
+RÈGLES :
 1. Intègre les nouvelles ressources DIRECTEMENT dans les fichiers existants (main.tf, variables.tf, outputs.tf).
-2. Retourne chaque fichier MODIFIÉ avec son contenu COMPLET (ancien code + nouveau code ensemble).
-3. Ne crée pas de nouveau fichier séparé sauf si c'est un module entièrement nouveau.
-4. Réutilise les variables existantes (var.naming_prefix, var.location, var.tags...) sans les redéclarer.
+2. Retourne chaque fichier MODIFIÉ avec son contenu COMPLET (ancien + nouveau).
+3. Ne crée pas de nouveau fichier sauf si c'est un module entièrement nouveau.
+4. Réutilise les variables existantes sans les redéclarer.
 5. Ne régénère PAS providers.tf s'il existe déjà.
 """
         else:
             existing_context = """
 Génère un projet Terraform complet avec : providers.tf, variables.tf, main.tf, outputs.tf
-IMPORTANT : Ne génère PAS de bloc backend dans providers.tf (le backend est géré par le pipeline CI/CD).
+Ne génère PAS de bloc backend dans providers.tf.
 """
 
-        tfvars_values = f"""naming_prefix = "{analysis.naming_prefix}"
-location      = "{analysis.location}"
-environment   = "{analysis.environment}"
-"""
+        tfvars_values = (
+            f'naming_prefix = "{analysis.naming_prefix}"\n'
+            f'location      = "{analysis.location}"\n'
+            f'environment   = "{analysis.environment}"\n'
+        )
 
         prompt = f"""
 {'Modifie le projet Terraform existant' if existing_tf else 'Crée un nouveau projet Terraform Azure'} pour provisionner les ressources suivantes.
 {existing_context}
-Projet : {analysis.project_name}
-Environnement : {analysis.environment}
-Région : {analysis.location}
-Préfixe : {analysis.naming_prefix}
-Tags : {json.dumps(analysis.tags)}
-Ressources à créer : {resources_desc}
+Projet      : {analysis.project_name}
+Environnement: {analysis.environment}
+Région      : {analysis.location}
+Préfixe     : {analysis.naming_prefix}
+Tags        : {json.dumps(analysis.tags)}
+Ressources  : {resources_desc}
 
-Retourne un JSON {{nom_fichier: contenu_hcl}} contenant :
-- Les fichiers MODIFIÉS avec leur contenu COMPLET (si fichiers existants)
-- Le fichier terraform.tfvars avec au minimum :
+Retourne un JSON {{nom_fichier: contenu_hcl}} contenant aussi terraform.tfvars avec :
 {tfvars_values}
-
-Règles :
-- azurerm >= 3.90, Terraform >= 1.5
-- Tags sur toutes les ressources
-- Pas de secrets en dur
-- RBAC moindre privilège
-- Private Endpoints pour les services PaaS sensibles
-- SystemAssigned Managed Identity si VM créée
-- Toutes les variables doivent avoir un default
-- Pas de bloc backend dans providers.tf
 """
+
+        # ── Couche 1 : génération LLM ──────────────────────────────────────────
         response = self.client.chat.completions.create(
             model=self.deployment,
             messages=[
@@ -247,12 +309,95 @@ Règles :
             max_tokens=8000,
             response_format={"type": "json_object"},
         )
+        files: dict[str, str] = json.loads(response.choices[0].message.content)
 
-        raw = response.choices[0].message.content
-        files = json.loads(raw)
+        # ── Couche 2 : post-traitement déterministe ────────────────────────────
+        files = _post_process(files)
 
-        # Ajoute le README généré automatiquement
+        # ── Couche 3 : validation LLM (dépendances et références) ─────────────
+        files = self._validate_and_correct(files)
+
+        # README automatique
         files["README.md"] = self._generate_readme(analysis, list(files.keys()))
+
+        return files
+
+    # ── Couche 3 : Validation et correction par le LLM ────────────────────────
+
+    def _validate_and_correct(self, files: dict[str, str]) -> dict[str, str]:
+        """
+        Second appel LLM : vérifie les dépendances Terraform et corrige
+        les références en dur, ressources manquantes, etc.
+        Retourne les fichiers avec les corrections appliquées.
+        """
+        tf_content = "\n\n".join(
+            f"### {fname}\n```hcl\n{content}\n```"
+            for fname, content in files.items()
+            if fname.endswith(".tf")
+        )
+
+        if not tf_content.strip():
+            return files
+
+        prompt = f"""
+Voici du code Terraform Azure généré automatiquement. Vérifie et corrige les problèmes.
+
+{tf_content}
+
+Vérifie OBLIGATOIREMENT ces points et CORRIGE tout ce qui est incorrect :
+
+1. DÉPENDANCES MANQUANTES
+   - Si azurerm_subnet existe → azurerm_virtual_network doit exister dans le même code
+   - Si azurerm_virtual_network existe → azurerm_resource_group doit exister dans le même code
+   - Si azurerm_storage_account existe → azurerm_resource_group doit exister
+
+2. RÉFÉRENCES EN DUR INTERDITES
+   - virtual_network_name = "nom-en-dur" → remplacer par azurerm_virtual_network.XXXX.name
+   - resource_group_name = "nom-en-dur" → remplacer par azurerm_resource_group.XXXX.name
+   - Tout attribut qui référence une autre ressource Azure doit utiliser une référence Terraform
+
+3. ATTRIBUTS INVALIDES
+   - azurerm_subnet, azurerm_network_security_rule, azurerm_route, azurerm_role_assignment
+     ne supportent PAS tags → supprimer l'attribut tags s'il est présent
+
+4. COMPLETUDE
+   - Toutes les variables utilisées (var.X) doivent être déclarées dans variables.tf avec un default
+
+Retourne un JSON {{nom_fichier: contenu_complet_corrigé}} avec UNIQUEMENT les fichiers qui ont été modifiés.
+Si un fichier est correct, ne l'inclus PAS dans la réponse.
+Si tous les fichiers sont corrects, retourne {{}}.
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Tu es un expert Terraform. Valide et corrige le code fourni. Réponds UNIQUEMENT en JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=8000,
+                response_format={"type": "json_object"},
+            )
+
+            corrections: dict[str, str] = json.loads(response.choices[0].message.content)
+
+            if corrections:
+                print(f"\n  ✅ Validation LLM — {len(corrections)} fichier(s) corrigé(s) :")
+                for fname in corrections:
+                    print(f"     • {fname}")
+                # Appliquer les corrections (uniquement les fichiers .tf et .tfvars)
+                for fname, content in corrections.items():
+                    if fname.endswith((".tf", ".tfvars")):
+                        files[fname] = content
+            else:
+                print("\n  ✅ Validation LLM — aucune correction nécessaire.")
+
+        except Exception as e:
+            print(f"\n  ⚠️  Validation LLM ignorée (erreur) : {e}")
 
         return files
 
@@ -285,30 +430,18 @@ Règles :
 ## Déploiement
 
 ```bash
-# 1. Copier et renseigner les variables
-cp terraform.tfvars.example terraform.tfvars
-# Editer terraform.tfvars avec vos vraies valeurs
-
-# 2. Initialiser Terraform
 terraform init
-
-# 3. Vérifier la configuration
-terraform validate
-
-# 4. Voir le plan
-terraform plan -var-file=terraform.tfvars
-
-# 5. Appliquer (après validation humaine)
+terraform plan  -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-## Fichiers générés
+## Fichiers
 
 {chr(10).join(f'- `{f}`' for f in tf_files)}
 
-## Tags appliqués
+## Tags
 
-```hcl
+```json
 {json.dumps(analysis.tags, indent=2)}
 ```
 """
