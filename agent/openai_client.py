@@ -52,6 +52,23 @@ Règles strictes :
 - Ne crée PAS de nouveau fichier séparé si les nouvelles ressources peuvent être ajoutées dans main.tf ou variables.tf existants
 - Toutes les variables déclarées doivent avoir une valeur par défaut (default = "...")
 - Ne génère JAMAIS de bloc backend dans providers.tf (le backend est géré par le pipeline CI/CD)
+
+RÈGLES CRITIQUES SUR LES DÉPENDANCES — NE JAMAIS VIOLER :
+- JAMAIS de nom de ressource Azure écrit en dur dans un attribut de référence (ex: virtual_network_name = "vnet-existing" est INTERDIT)
+- Utilise TOUJOURS les références Terraform : virtual_network_name = azurerm_virtual_network.main.name
+- Si tu crées un subnet, tu DOIS créer le azurerm_virtual_network dans le même code
+- Si tu crées une ressource qui dépend d'un resource group, tu DOIS créer le azurerm_resource_group dans le même code (sauf s'il existe déjà dans existing_tf)
+- Si tu crées une resource qui dépend d'un VNet et que ce VNet N'EST PAS dans existing_tf, tu DOIS le créer
+- N'invente jamais qu'une ressource Azure "existe déjà" si elle n'est pas dans existing_tf
+
+RESSOURCES AZURE QUI NE SUPPORTENT PAS `tags` — NE JAMAIS METTRE tags SUR CES RESSOURCES :
+- azurerm_subnet (PAS de tags)
+- azurerm_network_security_rule (PAS de tags — mettre tags sur azurerm_network_security_group)
+- azurerm_route (PAS de tags — mettre tags sur azurerm_route_table)
+- azurerm_role_assignment (PAS de tags)
+- azurerm_private_dns_zone_virtual_network_link (PAS de tags)
+- azurerm_subnet_network_security_group_association (PAS de tags)
+- azurerm_virtual_network_peering (PAS de tags)
 """
 
 
