@@ -1,107 +1,125 @@
 """
-standard_pipeline.py — Pipeline Terraform pour le repo infra-provisioned.
-Installé automatiquement par l'agent via ensure_standard_pipeline().
+standard_pipeline.py — Pipeline Terraform standard unique pour infra-provisioned.
+Poussé une seule fois à la création du repo. L'agent ne génère plus de workflow
+par ticket — il modifie uniquement les fichiers .tf et déclenche ce pipeline.
 """
 
-PIPELINE_VERSION = "2"
-
 STANDARD_PIPELINE = """\
-# pipeline-version: 2
-name: Terraform — infra-provisioned
+name: Terraform — Standard Pipeline
+
+# Plan  : sur chaque Pull Request
+# Apply : sur merge vers main (approbation humaine via merge = validation)
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'terraform/**'
+    paths: ['**/*.tf', '**/*.tfvars']
   push:
     branches: [main]
-    paths:
-      - 'terraform/**'
-  workflow_dispatch:
+    paths: ['**/*.tf', '**/*.tfvars']
 
 concurrency:
-  group: terraform-infra-provisioned
+  group: terraform-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  TF_WORKING_DIR: terraform
-  ARM_CLIENT_ID:       ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
-  ARM_CLIENT_SECRET:   ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
-  ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
-  ARM_TENANT_ID:       ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
-
 jobs:
+# =============================================================================
+# JOB 1 — PLAN (sur Pull Request uniquement)
+# =============================================================================
   plan:
-    name: Terraform Plan
+    name: "Terraform Plan"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
+      id-token: write
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Login Azure
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Configurer les credentials Terraform (ARM)
+        run: |
+          echo "ARM_CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)" >> $GITHUB_ENV
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.0"
+          terraform_version: "~1.9"
           terraform_wrapper: false
 
+      - name: Détecter le dossier Terraform modifié
+        id: tf_dir
+        run: |
+          CHANGED_DIR=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \\
+            | grep '\\.tf$' \\
+            | xargs -I{} dirname {} \\
+            | sort -u | head -1)
+          if [ -z "$CHANGED_DIR" ]; then
+            echo "❌ Aucun fichier .tf modifié détecté"
+            exit 1
+          fi
+          echo "dir=$CHANGED_DIR" >> "$GITHUB_OUTPUT"
+          echo "✅ Dossier Terraform : $CHANGED_DIR"
+
       - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -reconfigure
+        working-directory: ${{ steps.tf_dir.outputs.dir }}
+        run: terraform init -backend=false
 
       - name: Terraform Validate
         id: validate
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ steps.tf_dir.outputs.dir }}
         run: terraform validate -no-color
 
       - name: Terraform Plan
         id: plan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        working-directory: ${{ steps.tf_dir.outputs.dir }}
         run: |
-          set +e
-          terraform plan -no-color -detailed-exitcode -out=tfplan 2>&1 | tee /tmp/plan_output.txt
-          code=$?
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-          set -e
-          if [ "$code" -eq 1 ]; then exit 1; fi
+          set -o pipefail
+          TFVARS_ARG=""
+          if [ -f terraform.tfvars ]; then TFVARS_ARG="-var-file=terraform.tfvars"; fi
+          terraform plan -no-color -out=tfplan $TFVARS_ARG 2>&1 | tee /tmp/plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      - name: Comment PR with plan
+      - name: Poster le résultat du Plan sur la PR
         uses: actions/github-script@v7
         if: always()
         with:
           script: |
             const fs = require('fs');
-            let out = 'Sortie non disponible';
-            try { out = fs.readFileSync('/tmp/plan_output.txt', 'utf8').slice(-3500); } catch (e) {}
-            const ok = '${{ steps.plan.outcome }}' === 'success';
+            let planOutput = '';
+            try {
+              planOutput = fs.readFileSync('/tmp/plan_output.txt', 'utf8').slice(-3000);
+            } catch(e) { planOutput = 'Sortie non disponible'; }
+            const status = '${{ steps.plan.outcome }}' === 'success' ? '✅' : '❌';
             const body = [
-              `## ${ok ? '✅' : '❌'} Terraform Plan — infra-provisioned`,
+              `## ${status} Terraform Plan — \`${{ steps.tf_dir.outputs.dir }}\``,
               '',
-              '| Étape | Résultat |',
-              '|-------|----------|',
-              `| validate | ${{ steps.validate.outcome }} |`,
-              `| plan | ${{ steps.plan.outcome }} |`,
+              `| Étape    | Résultat |`,
+              `|----------|----------|`,
+              `| Validate | ${{ steps.validate.outcome }} |`,
+              `| Plan     | ${{ steps.plan.outcome }} |`,
               '',
-              '<details><summary>Plan (extrait)</summary>',
+              '<details><summary>Détails du plan</summary>',
               '',
-              '```',
-              out,
+              '```hcl',
+              planOutput,
               '```',
               '</details>',
               '',
-              '> Merge sur `main` pour lancer **terraform apply**.'
+              '> Mergez cette PR pour déclencher le **terraform apply** automatiquement.'
             ].join('\\n');
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -110,53 +128,91 @@ jobs:
               body
             });
 
-      - name: Fail if plan errored
-        if: steps.plan.outputs.exitcode == '1'
+      - name: Échec si plan KO
+        if: steps.plan.outputs.exitcode != '0' && steps.plan.outputs.exitcode != '2'
         run: exit 1
 
+# =============================================================================
+# JOB 2 — APPLY (sur push vers main = après merge de la PR)
+# =============================================================================
   apply:
-    name: Terraform Apply
+    name: "Terraform Apply"
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Login Azure
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Configurer les credentials Terraform (ARM)
+        run: |
+          echo "ARM_CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)" >> $GITHUB_ENV
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.0"
+          terraform_version: "~1.9"
           terraform_wrapper: false
 
-      - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -reconfigure
+      - name: Détecter le dossier Terraform modifié
+        id: tf_dir
+        run: |
+          CHANGED_DIR=$(git diff --name-only HEAD~1 HEAD \\
+            | grep '\\.tf$' \\
+            | xargs -I{} dirname {} \\
+            | sort -u | head -1)
+          if [ -z "$CHANGED_DIR" ]; then
+            echo "Aucun .tf modifié dans ce push — apply ignoré."
+            echo "dir=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "dir=$CHANGED_DIR" >> "$GITHUB_OUTPUT"
+          echo "✅ Dossier Terraform : $CHANGED_DIR"
 
-      - name: Terraform Plan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: terraform plan -out=tfplan -no-color
+      - name: Restaurer le state Terraform
+        if: steps.tf_dir.outputs.dir != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.tf_dir.outputs.dir }}/terraform.tfstate
+          key: tfstate-infra-provisioned
+          restore-keys: |
+            tfstate-infra-provisioned
+
+      - name: Terraform Init
+        if: steps.tf_dir.outputs.dir != ''
+        working-directory: ${{ steps.tf_dir.outputs.dir }}
+        run: terraform init -backend=false
 
       - name: Terraform Apply
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve -no-color tfplan
-
-      - name: Résumé
-        if: always()
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        if: steps.tf_dir.outputs.dir != ''
+        working-directory: ${{ steps.tf_dir.outputs.dir }}
         run: |
-          {
-            echo "## Apply infra-provisioned"
-            terraform output -json 2>/dev/null | head -c 2000 || echo "Pas de outputs"
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
+          TFVARS_ARG=""
+          if [ -f terraform.tfvars ]; then TFVARS_ARG="-var-file=terraform.tfvars"; fi
+          terraform apply -auto-approve -no-color $TFVARS_ARG 2>&1 | tee /tmp/apply_output.txt
+          echo "✅ Terraform Apply terminé"
+          grep -E "^(Apply complete|Error)" /tmp/apply_output.txt || tail -10 /tmp/apply_output.txt
+
+      - name: Sauvegarder le state Terraform
+        if: steps.tf_dir.outputs.dir != '' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.tf_dir.outputs.dir }}/terraform.tfstate
+          key: tfstate-infra-provisioned
 """
 
 
