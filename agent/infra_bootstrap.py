@@ -17,6 +17,7 @@ def get_bootstrap_files() -> dict[str, str]:
         f"{TF_ROOT}/providers.tf": _PROVIDERS_TF,
         f"{TF_ROOT}/variables.tf": _VARIABLES_TF,
         f"{TF_ROOT}/main.tf": _MAIN_TF,
+        f"{TF_ROOT}/network.tf": _NETWORK_TF,
         f"{TF_ROOT}/outputs.tf": _OUTPUTS_TF,
         f"{TF_ROOT}/terraform.tfvars.example": _TFVARS_EXAMPLE,
         "README.md": _README,
@@ -101,6 +102,49 @@ resource "azurerm_resource_group" "rg" {
   tags = merge(var.common_tags, {
     environment = var.environment
   })
+}
+"""
+
+_NETWORK_TF = """\
+# Réseau minimal pour VMs créées par l'agent (tickets Jira).
+
+resource "azurerm_virtual_network" "vnet" {
+  name                = "${var.naming_prefix}-vnet"
+  address_space       = ["10.1.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tags                = var.common_tags
+}
+
+resource "azurerm_subnet" "agent" {
+  name                 = "${var.naming_prefix}-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.1.1.0/24"]
+}
+
+resource "azurerm_network_security_group" "agent" {
+  name                = "${var.naming_prefix}-nsg"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tags                = var.common_tags
+
+  security_rule {
+    name                       = "SSH"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "agent" {
+  subnet_id                 = azurerm_subnet.agent.id
+  network_security_group_id = azurerm_network_security_group.agent.id
 }
 """
 

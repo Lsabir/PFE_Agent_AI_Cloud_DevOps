@@ -37,6 +37,7 @@ fi
 export AGENT_CI_MODE="true"
 export AGENT_SKIP_VALIDATION="true"
 export AGENT_AUTO_VALIDATE_PLAN="true"
+export AGENT_AUTO_MERGE="true"
 
 echo ""
 echo "Lancement de l'agent autonome..."

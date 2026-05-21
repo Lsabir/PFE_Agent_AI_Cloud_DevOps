@@ -42,13 +42,17 @@ le code Terraform NOUVEAU compatible avec le projet existant.
 
 Règles strictes :
 - Utilise toujours azurerm provider >= 3.90 et Terraform >= 1.5
-- Applique des tags sur toutes les ressources (project, environment, owner)
-- Ne duplique JAMAIS les ressources/variables/providers déjà présents dans le projet
-- Nomme les ressources avec un préfixe configurable via variable (réutilise var.naming_prefix si elle existe déjà)
-- Ne mets jamais de secrets ou de mots de passe en dur dans le code
-- Respecte le principe du moindre privilège pour les rôles RBAC
-- Active soft_delete sur Key Vault, disable public access sur les services sensibles
-- Préfère créer un fichier .tf dédié par feature plutôt que modifier main.tf
+- Applique des tags sur toutes les ressources via merge(var.common_tags, {...})
+- Ne duplique JAMAIS les ressources déjà dans le projet (azurerm_resource_group.rg existe déjà)
+- Ne génère JAMAIS providers.tf, backend.tf, variables.tf, main.tf, outputs.tf
+- Crée UN fichier .tf par ticket : ex. "pm5_vm.tf", "pm5_storage.tf" (nom en minuscules, sans espaces)
+- Resource group : TOUJOURS utiliser azurerm_resource_group.rg.name et .location (déjà dans main.tf)
+- Location : var.location
+- Tags : merge(var.common_tags, { environment = var.environment })
+- VM Linux : nécessite VNet/subnet — réutilise azurerm_virtual_network.vnet et azurerm_subnet.agent si présents dans network.tf, sinon crée-les dans le même fichier ticket
+- VM : admin_ssh_key { username = "azureuser" public_key = var.ssh_public_key }
+- Storage : resource_group_name = azurerm_resource_group.rg.name
+- Pas de secrets en dur ; pas de provider/version blocks dans les fichiers ticket
 """
 
 
@@ -151,7 +155,12 @@ Inclus TOUJOURS un réseau (type: "network") si d'autres ressources en ont besoi
 
     # ── Génération du code Terraform ───────────────────────────────────────────
 
-    def generate_terraform(self, analysis: InfraAnalysis, existing_tf: dict[str, str] | None = None) -> dict[str, str]:
+    def generate_terraform(
+        self,
+        analysis: InfraAnalysis,
+        existing_tf: dict[str, str] | None = None,
+        issue_key: str = "ticket",
+    ) -> dict[str, str]:
         """
         Génère les fichiers Terraform complets basés sur l'analyse.
         Retourne un dict {nom_fichier: contenu}.
@@ -179,19 +188,11 @@ Contenu des fichiers existants :
 {files_summary}
 
 RÈGLE CRITIQUE : Ne génère PAS les fichiers listés ci-dessus.
-Génère UNIQUEMENT les nouveaux fichiers .tf nécessaires pour les ressources demandées.
-<<<<<<< HEAD
-Les fichiers seront placés dans le dossier terraform/ du repo (ex: "storage_backup.tf", "vm_web.tf" — sans préfixe terraform/ dans le nom).
-NE PAS régénérer : providers.tf, backend.tf, variables.tf, main.tf, outputs.tf (déjà dans le bootstrap).
-Si de nouvelles variables sont nécessaires, crée "{analysis.project_name}_variables.tf" avec uniquement les nouvelles variables.
-Réutilise var.resource_group_name, var.location, var.naming_prefix, var.common_tags, azurerm_resource_group.rg.
-Référence le resource group existant : resource_group_name = azurerm_resource_group.rg.name
-=======
-Utilise un nom de fichier descriptif selon la ressource (ex: "storage_backup.tf", "vm_web.tf").
-Si de nouvelles variables sont nécessaires ET que variables.tf existe déjà,
-crée un fichier "{analysis.project_name}_variables.tf" avec seulement les nouvelles variables.
-Réutilise les variables existantes (var.naming_prefix, var.location, var.tags...) sans les redéclarer.
->>>>>>> 09ab011fd74f9934b02a5d2b8cc5928b1dfb7e1b
+Génère UNIQUEMENT des fichiers .tf NOUVEAUX nommés comme "{issue_key.lower()}_{{ressource}}.tf" (ex: {issue_key.lower()}_vm.tf).
+NE PAS nommer les fichiers : main.tf, providers.tf, backend.tf, variables.tf, outputs.tf.
+Réutilise OBLIGATOIREMENT : azurerm_resource_group.rg, var.location, var.common_tags, var.naming_prefix, var.ssh_public_key (pour VM).
+Si network.tf existe : réutilise azurerm_virtual_network.vnet et azurerm_subnet.agent pour les VM.
+Si de nouvelles variables sont nécessaires : fichier "{issue_key.lower()}_variables.tf" uniquement.
 """
         else:
             existing_context = """
@@ -208,16 +209,10 @@ Préfixe : {analysis.naming_prefix}
 Tags : {json.dumps(analysis.tags)}
 Ressources à créer : {resources_desc}
 
-Retourne un JSON {{nom_fichier: contenu_hcl}}.
-{"Génère UNIQUEMENT les nouveaux fichiers — pas de doublons avec l'existant." if existing_tf else ""}
+Retourne un JSON {{nom_fichier: contenu_hcl}} avec AU MOINS un fichier .tf contenant les ressources demandées.
+Clés JSON = noms de fichiers SANS préfixe terraform/ (ex: "pm5_vm.tf" pas "terraform/pm5_vm.tf").
 
-Règles :
-- azurerm >= 3.90, Terraform >= 1.5
-- Tags sur toutes les ressources
-- Pas de secrets en dur
-- RBAC moindre privilège
-- Private Endpoints pour les services PaaS sensibles
-- SystemAssigned Managed Identity si VM créée
+{"Génère UNIQUEMENT les nouveaux fichiers — pas de doublons avec l'existant." if existing_tf else ""}
 """
         response = self.client.chat.completions.create(
             model=self.deployment,

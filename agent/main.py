@@ -9,6 +9,7 @@ from datetime import datetime
 
 _CI = os.getenv("AGENT_CI_MODE", "false").lower() in ("true", "1")
 _SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "false").lower() in ("true", "1")
+_AUTO_MERGE = os.getenv("AGENT_AUTO_MERGE", "false").lower() in ("true", "1")
 _FORCED_TICKET = os.getenv("AGENT_TICKET", "").strip()
 
 from agent.config import load_config
@@ -208,7 +209,9 @@ def run_agent() -> None:
     print("  Génération des fichiers .tf selon les bonnes pratiques Azure...")
 
     try:
-        tf_files = openai_client.generate_terraform(analysis, existing_tf=existing_tf)
+        tf_files = openai_client.generate_terraform(
+            analysis, existing_tf=existing_tf, issue_key=issue_key
+        )
     except Exception as e:
         print(f"  ❌ Erreur génération Terraform : {e}")
         sys.exit(1)
@@ -257,16 +260,20 @@ def run_agent() -> None:
 
     commit_msg = f"feat({issue_key}): provision {analysis.project_name} — {analysis.environment}"
     try:
-        gh.push_files(
+        pushed_paths = gh.push_files(
             branch=branch_name,
             files=tf_files,
             commit_message=commit_msg,
+            issue_key=issue_key,
         )
     except Exception as e:
         print(f"  ❌ Erreur push : {e}")
         sys.exit(1)
 
-    info("Fichiers poussés dans infra-provisioned — le pipeline existant gère le déploiement.")
+    success(f"{len(pushed_paths)} fichier(s) poussé(s) sur la branche {branch_name} :")
+    for p in pushed_paths:
+        print(f"     • {p}")
+    info("Après MERGE de la PR sur main, le pipeline Apply créera les ressources dans Azure.")
 
     # ── 8. Création de la Pull Request ───────────────────────────────────────
     section("8. Création de la Pull Request")
@@ -380,7 +387,9 @@ def run_agent() -> None:
         
 
     # ── 10. Validation avant merge ───────────────────────────────────────────
-    auto_merge = _SKIP_VAL and (_CI or os.getenv("AGENT_AUTO_VALIDATE_PLAN", "").lower() in ("true", "1"))
+    auto_merge = _AUTO_MERGE or (
+        _SKIP_VAL and (_CI or os.getenv("AGENT_AUTO_VALIDATE_PLAN", "").lower() in ("true", "1"))
+    )
     plan_ok = conclusion in ("success", "unknown")
 
     if auto_merge and plan_ok:

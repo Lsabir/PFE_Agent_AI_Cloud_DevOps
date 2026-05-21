@@ -105,14 +105,41 @@ class GitHubManager:
             return f"{TF_ROOT}/{filename}"
         return filename
 
-    def push_files(self, branch: str, files: Dict[str, str], commit_message: str) -> None:
-        skip = {"providers.tf", "backend.tf", "variables.tf", "main.tf", "outputs.tf"}
+    def push_files(
+        self,
+        branch: str,
+        files: Dict[str, str],
+        commit_message: str,
+        issue_key: str = "ticket",
+    ) -> List[str]:
+        """Pousse les .tf générés. Retourne la liste des chemins poussés."""
+        protected = {"providers.tf", "backend.tf", "variables.tf", "main.tf", "outputs.tf", "network.tf"}
+        pushed: List[str] = []
+        ticket_slug = issue_key.lower().replace("-", "")
+
         for filename, content in files.items():
-            path = self._normalize_tf_path(filename)
-            base = path.split("/")[-1]
-            if base in skip and path.startswith(f"{TF_ROOT}/"):
+            if filename == "README.md":
+                self._create_or_update_file("README.md", content, branch, commit_message)
+                pushed.append("README.md")
                 continue
+            if not filename.endswith(".tf"):
+                continue
+            base = filename.split("/")[-1]
+            if base in protected:
+                # Renommer au lieu d'ignorer (évite de perdre le code du ticket)
+                base = f"{ticket_slug}_{base.replace('.tf', '')}.tf"
+            if not base.startswith(ticket_slug) and not base.startswith(issue_key.lower()):
+                base = f"{issue_key.lower()}_{base}"
+            path = f"{TF_ROOT}/{base}"
             self._create_or_update_file(path, content, branch, commit_message)
+            pushed.append(path)
+
+        if not pushed:
+            raise RuntimeError(
+                "Aucun fichier .tf poussé sur GitHub. L'IA a peut-être généré main.tf/providers.tf "
+                "au lieu d'un fichier dédié (ex: pm5_vm.tf). Relancez le ticket."
+            )
+        return pushed
 
     def create_pull_request(self, branch: str, analysis: Any, pr_body: str) -> Dict[str, Any]:
         title = f"feat: provision {analysis.project_name} — {analysis.environment}"
@@ -192,11 +219,26 @@ class GitHubManager:
         url = f"{self.api_url}/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge"
         payload = {
             "commit_title": f"Merge {project_name}",
-            "merge_method": "merge",
+            "merge_method": "squash",
         }
         resp = requests.put(url, headers=self.headers, json=payload)
+        if resp.status_code == 405:
+            payload["merge_method"] = "merge"
+            resp = requests.put(url, headers=self.headers, json=payload)
         resp.raise_for_status()
         return resp.json().get("sha", "")
+
+    def list_tf_files_on_branch(self, branch: str) -> List[str]:
+        sha = self._get_branch_sha(branch)
+        tree_url = f"{self.api_url}/repos/{self.owner}/{self.repo}/git/trees/{sha}"
+        resp = requests.get(tree_url, headers=self.headers, params={"recursive": "1"})
+        if not resp.ok:
+            return []
+        return [
+            item["path"]
+            for item in resp.json().get("tree", [])
+            if item.get("type") == "blob" and item.get("path", "").endswith(".tf")
+        ]
 
     def close_pull_request(self, pr_number: int) -> None:
         url = f"{self.api_url}/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
