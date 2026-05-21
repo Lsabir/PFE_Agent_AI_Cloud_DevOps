@@ -9,7 +9,6 @@ from datetime import datetime
 
 _CI = os.getenv("AGENT_CI_MODE", "false").lower() in ("true", "1")
 _SKIP_VAL = os.getenv("AGENT_SKIP_VALIDATION", "false").lower() in ("true", "1")
-_AUTO_MERGE = os.getenv("AGENT_AUTO_MERGE", "false").lower() in ("true", "1")
 _FORCED_TICKET = os.getenv("AGENT_TICKET", "").strip()
 
 from agent.config import load_config
@@ -173,7 +172,6 @@ def run_agent() -> None:
     existing_tf: dict = {}
     try:
         gh_early.ensure_repo_exists()
-        gh_early.setup_infra_repo()
         existing_tf = gh_early.get_repo_context()
         if existing_tf:
             info(f"Projet existant détecté : {len(existing_tf)} fichier(s) .tf trouvé(s).")
@@ -209,14 +207,12 @@ def run_agent() -> None:
     print("  Génération des fichiers .tf selon les bonnes pratiques Azure...")
 
     try:
-        tf_files = openai_client.generate_terraform(
-            analysis, existing_tf=existing_tf, issue_key=issue_key
-        )
+        tf_files = openai_client.generate_terraform(analysis, existing_tf=existing_tf)
     except Exception as e:
         print(f"  ❌ Erreur génération Terraform : {e}")
         sys.exit(1)
 
-    success(f"{len(tf_files)} fichier(s) Terraform (modifications) :")
+    success(f"{len(tf_files)} fichiers générés :")
     for fname in tf_files:
         print(f"     • {fname}")
 
@@ -233,14 +229,12 @@ def run_agent() -> None:
     try:
         repo_url = gh.ensure_repo_exists()
         success(f"Repo : {repo_url}")
-        if gh.ensure_standard_pipeline():
-            success("Pipeline terraform-standard.yml installé/mis à jour.")
+
+        pipeline_updated = gh.ensure_standard_pipeline()
+        if pipeline_updated:
+            success("Pipeline Terraform standard mis à jour dans infra-provisioned.")
         else:
-            info("Pipeline terraform-standard.yml déjà à jour.")
-        if gh.bootstrap_infra_repo():
-            success(f"Bootstrap {config.github_infra_repo} (dossier terraform/) créé.")
-        else:
-            info("Bootstrap terraform/ déjà présent.")
+            info("Pipeline Terraform standard déjà à jour.")
     except Exception as e:
         print(f"  ❌ Erreur GitHub : {e}")
         sys.exit(1)
@@ -260,20 +254,16 @@ def run_agent() -> None:
 
     commit_msg = f"feat({issue_key}): provision {analysis.project_name} — {analysis.environment}"
     try:
-        pushed_paths = gh.push_files(
+        gh.push_files(
             branch=branch_name,
             files=tf_files,
             commit_message=commit_msg,
-            issue_key=issue_key,
         )
     except Exception as e:
         print(f"  ❌ Erreur push : {e}")
         sys.exit(1)
 
-    success(f"{len(pushed_paths)} fichier(s) modifié(s) sur la branche {branch_name} :")
-    for p in pushed_paths:
-        print(f"     • {p}")
-    info("Modifications dans le projet existant — merge PR → terraform apply sur infra-provisioned.")
+    info("Fichiers poussés dans infra-provisioned — le pipeline existant gère le déploiement.")
 
     # ── 8. Création de la Pull Request ───────────────────────────────────────
     section("8. Création de la Pull Request")
@@ -386,28 +376,33 @@ def run_agent() -> None:
 
         
 
-    # ── 10. Validation avant merge ───────────────────────────────────────────
-    auto_merge = _AUTO_MERGE or (
-        _SKIP_VAL and (_CI or os.getenv("AGENT_AUTO_VALIDATE_PLAN", "").lower() in ("true", "1"))
-    )
-    plan_ok = conclusion in ("success", "unknown")
-
-    if auto_merge and plan_ok:
-        approved = True
-        info("[Autonome] Merge et apply approuvés automatiquement.")
-    else:
-        banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
-        print(f"""
+    # ── 10. VALIDATION HUMAINE ────────────────────────────────────────────────
+   # ── 10. Validation avant merge ───────────────────────────────────────────
+    banner("⛔  VALIDATION HUMAINE REQUISE — Terraform Apply")
+    print(f"""
   Avant de procéder au déploiement, vérifiez :
 
   1. 👀 Résultats du plan ci-dessus (conclusion : {conclusion.upper()})
   2. 🎫 Ticket Jira    : {config.jira_url}/browse/{issue_key}
   3. 🔗 Pull Request   : {pr_url}
   4. 📋 Ressources     : {len(analysis.resources)} ressource(s) Azure à créer
+  5. 🌍 Région         : {analysis.location}
+  6. 🏷  Environnement  : {analysis.environment}
 
-  ⚠  Le merge déclenchera terraform apply sur infra-provisioned (dossier terraform/).
+  ⚠  Le merge de la PR déclenchera automatiquement terraform apply
+     sur l'environnement '{analysis.environment}'.
 """)
-        approved = ask_confirmation("Approuvez-vous le merge et le déploiement ?", ci_default=False)
+
+    # ✅ Fix : TOUJOURS demander à l'humain, même en mode _CI
+    while True:
+        answer = input("  ❓ Approuvez-vous le déploiement ? [oui/non] : ").strip().lower()
+        if answer in ("oui", "o", "yes", "y"):
+            approved = True
+            break
+        if answer in ("non", "n", "no"):
+            approved = False
+            break
+        print("  → Répondez 'oui' ou 'non'.")
 
     # ── 11. Merge ou Refus ───────────────────────────────────────────────────
     if approved:
@@ -417,42 +412,22 @@ def run_agent() -> None:
         try:
             merge_sha = gh.merge_pull_request(pr_number, analysis.project_name)
             success("PR mergée avec succès.")
-            info("Le job 'Terraform Apply' démarre sur infra-provisioned.")
-            actions_url = f"https://github.com/{config.github_owner}/{config.github_infra_repo}/actions"
-            info(f"Suivez : {actions_url}")
-
-            wait_apply = os.getenv("WAIT_FOR_APPLY_COMPLETION", "true").lower() in ("true", "1")
-            apply_run = None
-            if wait_apply:
-                section("11b. Attente fin Terraform Apply")
-                info("Attente du workflow Apply (max 25 min)...")
-                apply_run = gh.wait_for_apply_completion(branch="main", timeout_minutes=25)
-                if apply_run:
-                    ac = apply_run.get("conclusion", "unknown")
-                    info(f"Apply terminé : {ac.upper()} — {apply_run.get('html_url', '')}")
-                    if ac != "success":
-                        warn("Apply en échec — vérifiez les logs GitHub Actions.")
-                else:
-                    warn("Timeout apply — vérifiez manuellement GitHub Actions.")
+            info("Le job 'Terraform Apply' démarre automatiquement sur GitHub Actions.")
+            info(f"Suivez l'exécution dans : {pr_url.replace('/pull/', '/actions')}")
 
             # ── Transition Jira → Done ────────────────────────────────────
             section(f"12. Transition Jira : {issue_key} → Done")
-            apply_ok = apply_run is None or apply_run.get("conclusion") == "success"
-            if apply_ok and jira.transition_to_done(issue_key):
+            if jira.transition_to_done(issue_key):
                 success(f"Ticket {issue_key} passé en 'Done'.")
-            elif not apply_ok:
-                warn(f"Apply non confirmé — ticket {issue_key} laissé en In Progress.")
             else:
                 warn(f"Impossible de transitionner {issue_key} en 'Done'. Faites-le manuellement.")
 
-            status_msg = "déployée" if apply_ok else "PR mergée, apply à vérifier"
             jira.add_comment(
                 issue_key,
-                f"✅ Infrastructure {status_msg}.\n"
-                f"PR : {pr_url}\n"
+                f"✅ Infrastructure déployée avec succès.\n"
+                f"PR mergée : {pr_url}\n"
                 f"SHA : {merge_sha[:8]}\n"
-                f"Repo : {config.github_infra_repo}\n"
-                f"Actions : {actions_url}"
+                f"Terraform Apply en cours sur GitHub Actions."
             )
 
             print(f"""
